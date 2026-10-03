@@ -1,0 +1,213 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EventStatus {
+  DRAFT
+  PENDING_PAYMENT
+  ACTIVE
+  CLOSED
+  EXPIRED
+}
+
+enum Distribution {
+  FIXED
+  RANDOM
+}
+
+enum MediaType {
+  VIDEO
+  PHOTO
+}
+
+enum AssignmentStatus {
+  PENDING
+  DONE
+}
+
+enum SubmissionStatus {
+  UPLOADING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum ModerationStatus {
+  PENDING_APPROVAL
+  APPROVED
+  HIDDEN
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  EXPIRED
+  FAILED
+}
+
+enum PaymentKind {
+  PLAN
+  EXTRA
+}
+
+model Organizer {
+  id            String         @id @default(cuid())
+  name          String
+  email         String?        @unique
+  phone         String?        @unique
+  isAdmin       Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  events        Event[]
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id          String    @id @default(cuid())
+  organizerId String
+  organizer   Organizer @relation(fields: [organizerId], references: [id], onDelete: Cascade)
+  tokenHash   String    @unique
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+}
+
+model Plan {
+  id                 String  @id
+  name               String
+  maxGuests          Int
+  maxVideosPerGuest  Int
+  maxVideoSeconds    Int
+  retentionDays      Int
+  priceKz            Int
+  active             Boolean @default(true)
+  events             Event[]
+}
+
+model Event {
+  id                  String       @id @default(cuid())
+  organizerId         String
+  organizer           Organizer    @relation(fields: [organizerId], references: [id])
+  planId              String?
+  plan                Plan?        @relation(fields: [planId], references: [id])
+  name                String
+  coverUrl            String?
+  timezone            String       @default("Africa/Luanda")
+  startsAt            DateTime
+  endsAt              DateTime
+  graceHours          Int          @default(24)
+  publicCode          String       @unique
+  distribution        Distribution @default(RANDOM)
+  challengesPerGuest  Int          @default(3)
+  moderation          Boolean      @default(false)
+  status              EventStatus  @default(DRAFT)
+  extraGuests         Int          @default(0)
+  extraVideosPerGuest Int          @default(0)
+  extraRetentionDays  Int          @default(0)
+  extendedMaxSeconds  Int?
+  expiresAt           DateTime?
+  createdAt           DateTime     @default(now())
+  challenges          Challenge[]
+  guests              Guest[]
+  payments            Payment[]
+  exports             Export[]
+}
+
+model Challenge {
+  id          String       @id @default(cuid())
+  eventId     String
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  text        String
+  mediaType   MediaType    @default(VIDEO)
+  order       Int
+  active      Boolean      @default(true)
+  assignments Assignment[]
+}
+
+model Guest {
+  id          String       @id @default(cuid())
+  eventId     String
+  event       Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name        String
+  phone       String
+  deviceId    String
+  blockedAt   DateTime?
+  consentAt   DateTime
+  createdAt   DateTime     @default(now())
+  assignments Assignment[]
+
+  @@unique([eventId, deviceId])
+  @@unique([eventId, phone])
+}
+
+model Assignment {
+  id          String           @id @default(cuid())
+  guestId     String
+  guest       Guest            @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  challengeId String
+  challenge   Challenge        @relation(fields: [challengeId], references: [id], onDelete: Cascade)
+  status      AssignmentStatus @default(PENDING)
+  submissions Submission[]
+
+  @@unique([guestId, challengeId])
+}
+
+model Submission {
+  id           String           @id @default(cuid())
+  assignmentId String
+  assignment   Assignment       @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  mediaType    MediaType
+  streamUid    String?          @unique
+  r2Key        String?          @unique
+  durationSec  Float?
+  sizeBytes    BigInt?
+  thumbnailUrl      String?
+  status            SubmissionStatus  @default(UPLOADING)
+  moderationStatus  ModerationStatus  @default(PENDING_APPROVAL)
+  createdAt         DateTime          @default(now())
+  readyAt           DateTime?
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  eventId     String
+  event       Event         @relation(fields: [eventId], references: [id])
+  kind        PaymentKind
+  description String
+  amountKz    Int
+  provider    String
+  reference   String?
+  entity      String?
+  status      PaymentStatus @default(PENDING)
+  payload     Json?
+  paidAt      DateTime?
+  createdAt   DateTime      @default(now())
+}
+
+model Export {
+  id        String   @id @default(cuid())
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  status    String
+  r2Key     String?
+  createdAt DateTime @default(now())
+}
+
+model OtpCode {
+  id        String   @id @default(cuid())
+  target    String
+  codeHash  String
+  attempts  Int      @default(0)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model ChallengeTemplate {
+  id        String    @id @default(cuid())
+  category  String
+  text      String
+  mediaType MediaType @default(VIDEO)
+}
