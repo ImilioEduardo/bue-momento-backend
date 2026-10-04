@@ -1,0 +1,16 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+# Railway API service — set SERVICE=api (default) in the Railway dashboard
+[deploy]
+startCommand = "sh scripts/start.sh"
+healthcheckPath = "/api/v1/health"
+healthcheckTimeout = 300
+restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 5
+
+# For the worker service, create a separate Railway service with:
+#   - Same Dockerfile / same image
+#   - Environment variable: SERVICE=worker
+#   - Start command: node dist/worker.js

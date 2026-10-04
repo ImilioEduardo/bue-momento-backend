@@ -14,6 +14,7 @@ export const envSchema = Joi.object({
   PUBLIC_WEB_URL: Joi.string().uri().required(),
   CF_ACCOUNT_ID: Joi.string().default(''),
   CF_STREAM_API_TOKEN: Joi.string().default(''),
+  CF_STREAM_CUSTOMER_SUBDOMAIN: Joi.string().default(''),
   STREAM_WEBHOOK_SECRET: Joi.string().default(''),
   STREAM_REQUIRE_SIGNED: Joi.boolean().default(false),
   R2_ACCOUNT_ID: Joi.string().default(''),

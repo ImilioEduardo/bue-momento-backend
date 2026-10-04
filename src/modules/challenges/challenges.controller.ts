@@ -6,6 +6,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
@@ -24,8 +25,8 @@ export class ChallengeTemplatesController {
   constructor(private readonly challengesService: ChallengesService) {}
 
   @Get()
-  listTemplates() {
-    return this.challengesService.listTemplates();
+  listTemplates(@Query('category') category?: string) {
+    return this.challengesService.listTemplates(category);
   }
 }
 

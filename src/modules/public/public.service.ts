@@ -2,44 +2,65 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Distribution, MediaType, SubmissionStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { EventLimitsService } from '../events/events-limits.service.js';
+import { StreamClient } from '../media/stream.client.js';
+import { StorageClient } from '../media/storage.client.js';
+import { NOTIFIER } from '../notifications/notifier.interface.js';
+import type { Notifier } from '../notifications/notifier.interface.js';
 import { JoinEventDto } from './dto/join-event.dto.js';
+import { UploadSubmissionDto } from './dto/upload-submission.dto.js';
+
+const ALLOWED_PHOTO_TYPES: Record<string, string> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/heic': '.heic',
+  'image/webp': '.webp',
+};
+
+const ACTIVE_STATUSES: SubmissionStatus[] = [
+  SubmissionStatus.UPLOADING,
+  SubmissionStatus.PROCESSING,
+  SubmissionStatus.READY,
+];
 
 type FrontendAssignmentStatus = 'PENDING' | 'UPLOADING' | 'PROCESSING' | 'READY' | 'FAILED';
 
-function computeStatus(
-  submissions: Array<{ status: string }>,
-): FrontendAssignmentStatus {
+function computeStatus(submissions: Array<{ status: string }>): FrontendAssignmentStatus {
   if (!submissions.length) return 'PENDING';
   const s = submissions.map((s) => s.status);
-  if (s.includes('READY') || s.includes('HIDDEN')) return 'READY';
+  if (s.includes('READY')) return 'READY';
   if (s.includes('PROCESSING')) return 'PROCESSING';
   if (s.includes('UPLOADING')) return 'UPLOADING';
   return 'FAILED';
 }
 
-function effectiveMaxSeconds(event: {
-  extendedMaxSeconds?: number | null;
-  plan?: { maxVideoSeconds: number } | null;
-}) {
-  return event.extendedMaxSeconds ?? event.plan?.maxVideoSeconds ?? 30;
-}
-
 @Injectable()
 export class PublicService {
+  private readonly logger = new Logger(PublicService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
+    private readonly limitsService: EventLimitsService,
+    private readonly stream: StreamClient,
+    private readonly storage: StorageClient,
+    @Inject(NOTIFIER) private readonly notifier: Notifier,
   ) {}
 
-  // ── Dev TUS upload state (memory-only, dev mode) ─────────────────────────
+  // ── Dev TUS upload state (memory-only) ───────────────────────────────────
   private readonly devTusUploads = new Map<string, { offset: number; total: number }>();
+
+  // ── Public event info ─────────────────────────────────────────────────────
 
   async getPublicEvent(code: string) {
     const event = await this.prisma.event.findUnique({
@@ -54,7 +75,7 @@ export class PublicService {
     if (event.status === 'ACTIVE') {
       if (now < event.startsAt) {
         status = 'NOT_STARTED';
-      } else if (now > new Date(event.endsAt.getTime() + event.graceHours * 3600_000)) {
+      } else if (now > new Date(event.endsAt.getTime() + event.graceHours * 3_600_000)) {
         status = 'ENDED';
       } else {
         const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
@@ -79,10 +100,17 @@ export class PublicService {
       guestCount,
       startAt: event.startsAt.toISOString(),
       endAt: event.endsAt.toISOString(),
+      consentText: 'Ao participar aceitas que as tuas gravações sejam partilhadas com o organizador do evento.',
     };
   }
 
+  // ── Join ──────────────────────────────────────────────────────────────────
+
   async joinEvent(code: string, dto: JoinEventDto) {
+    if (!dto.consentAccepted) {
+      throw new BadRequestException({ code: 'CONSENT_REQUIRED', message: 'É necessário aceitar o consentimento.' });
+    }
+
     const event = await this.prisma.event.findUnique({
       where: { publicCode: code },
       include: { plan: true },
@@ -90,11 +118,7 @@ export class PublicService {
     if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
     if (event.status !== 'ACTIVE') throw new BadRequestException({ code: 'EVENT_NOT_ACTIVE' });
 
-    const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
-    const maxGuests = (event.plan?.maxGuests ?? 0) + event.extraGuests;
-    if (guestCount >= maxGuests) throw new ConflictException({ code: 'EVENT_FULL' });
-
-    // Upsert guest (same device rejoins)
+    // Re-login: same device already registered for this event
     let guest = await this.prisma.guest.findFirst({
       where: { eventId: event.id, deviceId: dto.deviceId },
     });
@@ -102,13 +126,18 @@ export class PublicService {
     if (guest?.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED' });
 
     if (!guest) {
-      // Check duplicate phone
+      // Phone already used → treat as re-login on a different device
       const byPhone = await this.prisma.guest.findFirst({
         where: { eventId: event.id, phone: dto.phone },
       });
       if (byPhone) {
+        if (byPhone.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED' });
         guest = byPhone;
       } else {
+        // New guest — enforce limits
+        const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
+        this.limitsService.assertGuestCanJoin(event, guestCount);
+
         guest = await this.prisma.guest.create({
           data: {
             eventId: event.id,
@@ -118,8 +147,14 @@ export class PublicService {
             consentAt: new Date(),
           },
         });
-        // Assign challenges
+
         await this.assignChallenges(guest.id, event.id, event.challengesPerGuest, event.distribution);
+
+        // Notify organizer when the last available slot is taken
+        const maxGuests = (event.plan?.maxGuests ?? 0) + event.extraGuests;
+        if (guestCount + 1 >= maxGuests) {
+          this.notifyGuestLimitReached(event.id, maxGuests).catch(() => {});
+        }
       }
     }
 
@@ -131,14 +166,22 @@ export class PublicService {
       },
     );
 
-    return { guestToken };
+    const assignments = await this.getAssignments(guest.id, event.id);
+
+    return {
+      guestToken,
+      guest: { id: guest.id, name: guest.name, phone: guest.phone },
+      assignments,
+    };
   }
+
+  // ── Balanced challenge assignment ─────────────────────────────────────────
 
   private async assignChallenges(
     guestId: string,
     eventId: string,
     count: number,
-    distribution: string,
+    distribution: Distribution,
   ) {
     const challenges = await this.prisma.challenge.findMany({
       where: { eventId, active: true },
@@ -146,10 +189,23 @@ export class PublicService {
     });
     if (!challenges.length) return;
 
-    let selected =
-      distribution === 'RANDOM'
-        ? [...challenges].sort(() => Math.random() - 0.5).slice(0, count)
-        : challenges.slice(0, count);
+    // Build per-challenge assignment counts for balanced RANDOM distribution
+    const assignmentCounts = new Map<string, number>();
+    const countRows = await this.prisma.assignment.groupBy({
+      by: ['challengeId'],
+      where: { challenge: { eventId } },
+      _count: { challengeId: true },
+    });
+    for (const row of countRows) {
+      assignmentCounts.set(row.challengeId, row._count.challengeId);
+    }
+
+    const selected = this.limitsService.assignChallenges(
+      challenges,
+      count,
+      distribution,
+      assignmentCounts,
+    );
 
     await this.prisma.assignment.createMany({
       data: selected.map((c) => ({ guestId, challengeId: c.id })),
@@ -157,12 +213,49 @@ export class PublicService {
     });
   }
 
+  private async notifyGuestLimitReached(eventId: string, maxGuests: number): Promise<void> {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      include: { organizer: { select: { name: true, email: true, phone: true } } },
+    });
+    if (!event?.organizer) return;
+    const org = event.organizer;
+    const msg = `Olá ${org.name}, o teu evento "${event.name}" atingiu o limite de ${maxGuests} convidados. Compra o extra "+50 convidados" para acomodar mais.`;
+    if (org.email) await this.notifier.sendEmail(org.email, 'Limite de convidados atingido — Bué Momentos', `<p>${msg}</p>`);
+    if (org.phone) await this.notifier.sendSms(org.phone, msg);
+  }
+
+  // ── /public/me ────────────────────────────────────────────────────────────
+
+  async getMe(guestId: string, eventId: string) {
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      include: { plan: true },
+    });
+    if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
+
+    const limits = this.limitsService.getEffectiveLimits(event);
+    const assignments = await this.getAssignments(guestId, eventId);
+
+    return {
+      assignments,
+      limits: {
+        maxVideoSeconds: limits.maxVideoSeconds,
+        maxVideosPerGuest: limits.maxVideosPerGuest,
+      },
+    };
+  }
+
+  // ── Assignments ───────────────────────────────────────────────────────────
+
   async getAssignments(guestId: string, eventId: string) {
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
       include: { plan: true },
     });
-    const maxSec = effectiveMaxSeconds(event ?? {});
+
+    const maxSec =
+      event?.extendedMaxSeconds ?? event?.plan?.maxVideoSeconds ?? 30;
 
     const assignments = await this.prisma.assignment.findMany({
       where: { guestId },
@@ -187,7 +280,9 @@ export class PublicService {
       where: { id: eventId },
       include: { plan: true },
     });
-    const maxSec = effectiveMaxSeconds(event ?? {});
+
+    const maxSec =
+      event?.extendedMaxSeconds ?? event?.plan?.maxVideoSeconds ?? 30;
 
     const a = await this.prisma.assignment.findFirst({
       where: { id: aid, guestId },
@@ -208,86 +303,145 @@ export class PublicService {
     };
   }
 
-  async initVideoUpload(guestId: string, eventId: string, aid: string) {
-    const a = await this.prisma.assignment.findFirst({
-      where: { id: aid, guestId },
-    });
-    if (!a) throw new NotFoundException({ code: 'ASSIGNMENT_NOT_FOUND' });
+  // ── Unified upload initiation ─────────────────────────────────────────────
 
+  async initiateUpload(guestId: string, eventId: string, aid: string, dto: UploadSubmissionDto) {
+    const assignment = await this.prisma.assignment.findFirst({
+      where: { id: aid, guestId },
+      include: {
+        submissions: {
+          where: { status: { in: [...ACTIVE_STATUSES] } },
+          orderBy: { createdAt: 'desc' },
+          take: 1,
+        },
+      },
+    });
+    if (!assignment) throw new NotFoundException({ code: 'ASSIGNMENT_NOT_FOUND' });
+
+    const event = await this.prisma.event.findUnique({
+      where: { id: eventId },
+      include: { plan: true },
+    });
+    if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
+
+    if (!this.limitsService.isWithinSubmissionWindow(event)) {
+      throw new BadRequestException({
+        code: 'SUBMISSION_WINDOW_CLOSED',
+        message: 'O período de envio terminou.',
+      });
+    }
+
+    const limits = this.limitsService.getEffectiveLimits(event);
+    const existingActive = assignment.submissions[0];
+
+    // If this assignment has no active submission, enforce the per-guest video limit
+    if (!existingActive) {
+      const activeCount = await this.prisma.submission.count({
+        where: {
+          status: { in: [...ACTIVE_STATUSES] },
+          assignment: { guestId },
+        },
+      });
+      if (activeCount >= limits.maxVideosPerGuest) {
+        throw new ConflictException({
+          code: 'VIDEO_LIMIT_REACHED',
+          message: 'Atingiste o limite máximo de envios.',
+        });
+      }
+    }
+
+    // Delete previous active submission (re-upload replaces the old one)
+    if (existingActive) {
+      if (existingActive.streamUid) await this.stream.deleteVideo(existingActive.streamUid);
+      if (existingActive.r2Key) await this.storage.deleteObject(existingActive.r2Key);
+      await this.prisma.submission.delete({ where: { id: existingActive.id } });
+      await this.prisma.assignment.update({ where: { id: aid }, data: { status: 'PENDING' } });
+    }
+
+    if (dto.mediaType === MediaType.VIDEO) {
+      if (!dto.uploadLength) {
+        throw new BadRequestException({ code: 'UPLOAD_LENGTH_REQUIRED', message: 'uploadLength é obrigatório para vídeos.' });
+      }
+      return this.createVideoSubmission(eventId, aid, dto.uploadLength, limits.maxVideoSeconds);
+    } else {
+      if (!dto.contentType || !dto.size) {
+        throw new BadRequestException({ code: 'PHOTO_FIELDS_REQUIRED', message: 'contentType e size são obrigatórios para fotos.' });
+      }
+      return this.createPhotoSubmission(eventId, aid, dto.contentType, dto.size);
+    }
+  }
+
+  private async createVideoSubmission(
+    eventId: string,
+    aid: string,
+    uploadLength: number,
+    maxVideoSeconds: number,
+  ) {
     const submission = await this.prisma.submission.create({
       data: { assignmentId: aid, mediaType: 'VIDEO', status: 'UPLOADING' },
     });
 
-    const cfAccount = this.config.get<string>('CF_ACCOUNT_ID');
-    const cfToken = this.config.get<string>('CF_STREAM_API_TOKEN');
-
-    if (cfAccount && cfToken) {
-      // Real Cloudflare Stream TUS upload URL
-      const res = await fetch(
-        `https://api.cloudflare.com/client/v4/accounts/${cfAccount}/stream?direct_user=true`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${cfToken}`,
-            'Tus-Resumable': '1.0.0',
-            'Upload-Length': '0',
-            'Upload-Metadata': `requiresignedurls`,
-          },
-        },
-      );
-      const tusUploadUrl = res.headers.get('location') ?? '';
-      const streamUid = res.headers.get('stream-media-id') ?? undefined;
-      await this.prisma.submission.update({
-        where: { id: submission.id },
-        data: { streamUid },
-      });
+    if (!this.stream.isConfigured) {
+      // Dev stub: point to the mock TUS endpoint served by this API
+      const port = this.config.get<string>('PORT') ?? '3001';
+      const tusUploadUrl = `http://localhost:${port}/api/v1/dev/tus/${submission.id}`;
+      this.devTusUploads.set(submission.id, { offset: 0, total: 0 });
       return { submissionId: submission.id, tusUploadUrl };
     }
 
-    // Dev stub: point to our mock TUS endpoint
-    const backendUrl = `http://localhost:${this.config.get('PORT') ?? 3001}`;
-    const tusUploadUrl = `${backendUrl}/api/v1/dev/tus/${submission.id}`;
-    this.devTusUploads.set(submission.id, { offset: 0, total: 0 });
+    const expiryISO = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
+    const { tusUploadUrl, streamUid } = await this.stream.createTusUpload({
+      submissionId: submission.id,
+      uploadLength,
+      maxDurationSec: maxVideoSeconds,
+      expiryISO,
+    });
+
+    await this.prisma.submission.update({
+      where: { id: submission.id },
+      data: { streamUid },
+    });
+
     return { submissionId: submission.id, tusUploadUrl };
   }
 
-  async initPhotoUpload(guestId: string, eventId: string, aid: string) {
-    const a = await this.prisma.assignment.findFirst({
-      where: { id: aid, guestId },
-    });
-    if (!a) throw new NotFoundException({ code: 'ASSIGNMENT_NOT_FOUND' });
+  private async createPhotoSubmission(
+    eventId: string,
+    aid: string,
+    contentType: string,
+    sizeBytes: number,
+  ) {
+    const ext = ALLOWED_PHOTO_TYPES[contentType];
+    if (!ext) {
+      throw new BadRequestException({
+        code: 'INVALID_CONTENT_TYPE',
+        message: 'Tipo de imagem não suportado. Use JPEG, PNG, HEIC ou WebP.',
+      });
+    }
 
     const submission = await this.prisma.submission.create({
       data: { assignmentId: aid, mediaType: 'PHOTO', status: 'UPLOADING' },
     });
 
-    const r2Account = this.config.get<string>('R2_ACCOUNT_ID');
-    const r2Key = this.config.get<string>('R2_ACCESS_KEY_ID');
-    const r2Secret = this.config.get<string>('R2_SECRET_ACCESS_KEY');
-    const r2Bucket = this.config.get<string>('R2_BUCKET');
+    const r2Key = `events/${eventId}/photos/${submission.id}${ext}`;
 
-    if (r2Account && r2Key && r2Secret && r2Bucket) {
-      const putUrl = await generateR2PutUrl(r2Account, r2Key, r2Secret, r2Bucket, submission.id);
-      return { submissionId: submission.id, putUrl };
-    }
+    await this.prisma.submission.update({
+      where: { id: submission.id },
+      data: { r2Key, sizeBytes: BigInt(sizeBytes) },
+    });
 
-    // Dev stub
-    const backendUrl = `http://localhost:${this.config.get('PORT') ?? 3001}`;
-    const putUrl = `${backendUrl}/api/v1/dev/photo/${submission.id}`;
+    const putUrl = await this.storage.presignPutUrl(r2Key, contentType, sizeBytes, 15 * 60);
     return { submissionId: submission.id, putUrl };
   }
 
+  // ── Submission state ──────────────────────────────────────────────────────
+
   async getSubmission(guestId: string, sid: string) {
     const sub = await this.prisma.submission.findFirst({
-      where: {
-        id: sid,
-        assignment: { guestId },
-      },
+      where: { id: sid, assignment: { guestId } },
     });
     if (!sub) throw new NotFoundException({ code: 'SUBMISSION_NOT_FOUND' });
-
-    const status = sub.status;
-    return { id: sub.id, status };
+    return { id: sub.id, status: sub.status };
   }
 
   async completePhotoSubmission(guestId: string, sid: string) {
@@ -295,18 +449,23 @@ export class PublicService {
       where: { id: sid, assignment: { guestId } },
     });
     if (!sub) throw new NotFoundException({ code: 'SUBMISSION_NOT_FOUND' });
+    if (sub.mediaType !== 'PHOTO') {
+      throw new BadRequestException({ code: 'NOT_A_PHOTO' });
+    }
 
-    // In production this would trigger thumbnail generation via R2 event
-    // For MVP, mark READY immediately
+    if (sub.r2Key && this.storage.isConfigured) {
+      const { exists } = await this.storage.headObject(sub.r2Key);
+      if (!exists) throw new BadRequestException({ code: 'PHOTO_NOT_UPLOADED', message: 'Foto ainda não chegou ao servidor.' });
+    }
+
     await this.prisma.submission.update({
       where: { id: sid },
       data: { status: 'READY', readyAt: new Date() },
     });
-
     await this.markAssignmentDone(sub.assignmentId);
   }
 
-  // ── Dev TUS stub helpers ──────────────────────────────────────────────────
+  // ── Dev TUS stub ──────────────────────────────────────────────────────────
 
   devTusHead(sid: string) {
     const state = this.devTusUploads.get(sid);
@@ -346,62 +505,4 @@ export class PublicService {
       data: { status: 'DONE' },
     });
   }
-}
-
-// ── Minimal R2 SigV4 presigned PUT (no AWS SDK needed) ────────────────────
-
-async function generateR2PutUrl(
-  accountId: string,
-  accessKey: string,
-  secretKey: string,
-  bucket: string,
-  key: string,
-): Promise<string> {
-  const { createHmac, createHash } = await import('crypto');
-  const host = `${accountId}.r2.cloudflarestorage.com`;
-  const region = 'auto';
-  const service = 's3';
-  const now = new Date();
-  const date = now.toISOString().slice(0, 10).replace(/-/g, '');
-  const datetime = now.toISOString().replace(/[-:]/g, '').slice(0, 15) + 'Z';
-  const expires = 3600;
-
-  const credentialScope = `${date}/${region}/${service}/aws4_request`;
-  const credential = `${accessKey}/${credentialScope}`;
-
-  const qs = new URLSearchParams({
-    'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-    'X-Amz-Credential': credential,
-    'X-Amz-Date': datetime,
-    'X-Amz-Expires': String(expires),
-    'X-Amz-SignedHeaders': 'host',
-  });
-
-  const canonicalRequest = [
-    'PUT',
-    `/${bucket}/${key}`,
-    qs.toString(),
-    `host:${host}\n`,
-    'host',
-    'UNSIGNED-PAYLOAD',
-  ].join('\n');
-
-  const stringToSign = [
-    'AWS4-HMAC-SHA256',
-    datetime,
-    credentialScope,
-    createHash('sha256').update(canonicalRequest).digest('hex'),
-  ].join('\n');
-
-  const sign = (key: Buffer | string, data: string) =>
-    createHmac('sha256', key).update(data).digest();
-
-  const signingKey = sign(
-    sign(sign(sign(`AWS4${secretKey}`, date), region), service),
-    'aws4_request',
-  );
-  const signature = createHmac('sha256', signingKey).update(stringToSign).digest('hex');
-
-  qs.set('X-Amz-Signature', signature);
-  return `https://${host}/${bucket}/${key}?${qs.toString()}`;
 }

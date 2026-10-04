@@ -15,6 +15,7 @@ import { ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 import { PublicService } from './public.service.js';
 import { JoinEventDto } from './dto/join-event.dto.js';
+import { UploadSubmissionDto } from './dto/upload-submission.dto.js';
 import { GuestJwtGuard } from './guards/guest-jwt.guard.js';
 import { CurrentGuest } from './decorators/current-guest.decorator.js';
 import type { GuestPayload } from './decorators/current-guest.decorator.js';
@@ -34,10 +35,11 @@ export class PublicController {
     return this.svc.joinEvent(code, dto);
   }
 
+  // Returns the authenticated guest's assignments and limits
   @UseGuards(GuestJwtGuard)
-  @Get('events/:code/assignments')
-  getAssignments(@CurrentGuest() guest: GuestPayload) {
-    return this.svc.getAssignments(guest.sub, guest.eventId);
+  @Get('me')
+  getMe(@CurrentGuest() guest: GuestPayload) {
+    return this.svc.getMe(guest.sub, guest.eventId);
   }
 
   @UseGuards(GuestJwtGuard)
@@ -46,22 +48,15 @@ export class PublicController {
     return this.svc.getAssignment(guest.sub, guest.eventId, aid);
   }
 
+  // Unified upload endpoint — handles both VIDEO (returns tusUploadUrl) and PHOTO (returns putUrl)
   @UseGuards(GuestJwtGuard)
   @Post('assignments/:aid/uploads')
-  initVideoUpload(@Param('aid') aid: string, @CurrentGuest() guest: GuestPayload) {
-    return this.svc.initVideoUpload(guest.sub, guest.eventId, aid);
-  }
-
-  @UseGuards(GuestJwtGuard)
-  @Post('assignments/:aid/photo-upload')
-  initPhotoUpload(@Param('aid') aid: string, @CurrentGuest() guest: GuestPayload) {
-    return this.svc.initPhotoUpload(guest.sub, guest.eventId, aid);
-  }
-
-  @UseGuards(GuestJwtGuard)
-  @Get('submissions/:sid')
-  getSubmission(@Param('sid') sid: string, @CurrentGuest() guest: GuestPayload) {
-    return this.svc.getSubmission(guest.sub, sid);
+  initiateUpload(
+    @Param('aid') aid: string,
+    @Body() dto: UploadSubmissionDto,
+    @CurrentGuest() guest: GuestPayload,
+  ) {
+    return this.svc.initiateUpload(guest.sub, guest.eventId, aid, dto);
   }
 
   @UseGuards(GuestJwtGuard)
@@ -69,16 +64,21 @@ export class PublicController {
   completePhoto(@Param('sid') sid: string, @CurrentGuest() guest: GuestPayload) {
     return this.svc.completePhotoSubmission(guest.sub, sid);
   }
+
+  @UseGuards(GuestJwtGuard)
+  @Get('submissions/:sid')
+  getSubmission(@Param('sid') sid: string, @CurrentGuest() guest: GuestPayload) {
+    return this.svc.getSubmission(guest.sub, sid);
+  }
 }
 
-// ── Dev-only TUS stub & photo stub (only registered in non-production) ────
+// ── Dev-only TUS stub & photo stub (disabled in production) ──────────────────
 
 @ApiTags('dev')
 @Controller('dev')
 export class DevController {
   constructor(private readonly svc: PublicService) {}
 
-  // tus HEAD — returns current upload offset
   @Get('tus/:sid')
   devTusHead(@Param('sid') sid: string, @Res() res: Response) {
     if (process.env['NODE_ENV'] === 'production') { res.status(404).end(); return; }
@@ -91,7 +91,6 @@ export class DevController {
       .end();
   }
 
-  // tus PATCH — accepts and discards chunk data, tracks offset
   @Patch('tus/:sid')
   async devTusPatch(
     @Param('sid') sid: string,
@@ -103,7 +102,6 @@ export class DevController {
   ) {
     if (process.env['NODE_ENV'] === 'production') { res.status(404).end(); return; }
 
-    // Drain request body without processing it
     await new Promise<void>((resolve) => {
       req.resume();
       req.on('end', resolve);
@@ -122,7 +120,6 @@ export class DevController {
       .end();
   }
 
-  // R2 photo stub — accepts and discards file body
   @Put('photo/:sid')
   async devPhotoAccept(
     @Param('sid') sid: string,

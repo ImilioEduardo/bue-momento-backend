@@ -9,6 +9,11 @@ import { AdminService } from './admin.service.js';
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
+  @Get('organizers')
+  getOrganizers() {
+    return this.adminService.getOrganizers();
+  }
+
   @Get('events')
   getEvents() {
     return this.adminService.getEvents();

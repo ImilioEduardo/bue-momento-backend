@@ -76,9 +76,9 @@ export class ChallengesService {
     return this.prisma.challenge.findMany({ where: { eventId }, orderBy: { order: 'asc' } });
   }
 
-  async listTemplates() {
+  async listTemplates(category?: string) {
     const templates = await this.prisma.challengeTemplate.findMany({
-      distinct: ['category', 'text'],
+      where: category ? { category } : undefined,
       orderBy: [{ category: 'asc' }, { id: 'asc' }],
     });
     const grouped: Record<string, typeof templates> = {};
@@ -86,7 +86,7 @@ export class ChallengesService {
       if (!grouped[t.category]) grouped[t.category] = [];
       grouped[t.category].push(t);
     }
-    return Object.entries(grouped).map(([category, items]) => ({ category, items }));
+    return Object.entries(grouped).map(([cat, items]) => ({ category: cat, items }));
   }
 
   async createBulk(organizerId: string, eventId: string, dtos: CreateChallengeDto[]) {

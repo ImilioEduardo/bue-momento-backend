@@ -1,10 +1,30 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { EventStatus } from '@prisma/client';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { PaymentsService } from '../payments/payments.service.js';
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly payments: PaymentsService,
+  ) {}
+
+  async getOrganizers() {
+    const organizers = await this.prisma.organizer.findMany({
+      include: { _count: { select: { events: true } } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return organizers.map((o) => ({
+      id: o.id,
+      name: o.name,
+      email: o.email ?? undefined,
+      phone: o.phone ?? undefined,
+      isAdmin: o.isAdmin,
+      eventCount: o._count.events,
+      createdAt: o.createdAt.toISOString(),
+    }));
+  }
 
   async getEvents() {
     const events = await this.prisma.event.findMany({
@@ -36,9 +56,7 @@ export class AdminService {
   async getPayments() {
     const payments = await this.prisma.payment.findMany({
       include: {
-        event: {
-          select: { name: true, organizer: { select: { name: true } } },
-        },
+        event: { select: { name: true, organizer: { select: { name: true } } } },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -66,29 +84,14 @@ export class AdminService {
       }),
     ]);
 
-    return {
-      videoMinutesTotal: 0,
-      storageGbTotal: 0,
-      failedUploadsToday,
-      activeEvents,
-    };
+    return { videoMinutesTotal: 0, storageGbTotal: 0, failedUploadsToday, activeEvents };
   }
 
   async confirmPayment(paymentId: string) {
     const payment = await this.prisma.payment.findUnique({ where: { id: paymentId } });
     if (!payment) throw new NotFoundException({ code: 'PAYMENT_NOT_FOUND' });
 
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
-        where: { id: paymentId },
-        data: { status: 'PAID', paidAt: new Date() },
-      }),
-      this.prisma.event.update({
-        where: { id: payment.eventId },
-        data: { status: EventStatus.ACTIVE },
-      }),
-    ]);
-
+    await this.payments.applyPayment(paymentId);
     return { ok: true };
   }
 }

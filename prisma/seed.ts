@@ -45,6 +45,8 @@ async function main() {
     },
   });
 
+  await prisma.challengeTemplate.deleteMany();
+
   const templates = [
     // Casamento (10)
     { category: 'casamento', text: 'Grava um vídeo com a mãe do noivo', mediaType: MediaType.VIDEO },
@@ -83,9 +85,7 @@ async function main() {
     { category: 'empresa', text: 'Deixa uma mensagem de inspiração para toda a equipa', mediaType: MediaType.VIDEO },
   ];
 
-  for (const template of templates) {
-    await prisma.challengeTemplate.create({ data: template });
-  }
+  await prisma.challengeTemplate.createMany({ data: templates });
 
   console.log('Seed concluído: 3 planos e 30 modelos de desafios criados.');
 }

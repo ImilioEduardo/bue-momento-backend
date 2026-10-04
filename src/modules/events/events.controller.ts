@@ -8,6 +8,7 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Res,
   UseGuards,
 } from '@nestjs/common';
@@ -29,10 +30,7 @@ export class EventsController {
   constructor(private readonly eventsService: EventsService) {}
 
   @Post()
-  create(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Body() dto: CreateEventDto,
-  ) {
+  create(@CurrentOrganizer() organizer: OrganizerPayload, @Body() dto: CreateEventDto) {
     return this.eventsService.create(organizer.sub, dto);
   }
 
@@ -42,56 +40,43 @@ export class EventsController {
   }
 
   @Get(':id')
-  findOne(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  findOne(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.findOne(organizer.sub, id);
   }
 
   @Patch(':id')
-  update(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-    @Body() dto: UpdateEventDto,
-  ) {
+  update(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string, @Body() dto: UpdateEventDto) {
     return this.eventsService.update(organizer.sub, id, dto);
   }
 
   @Delete(':id')
-  remove(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  remove(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.remove(organizer.sub, id);
   }
 
   @Post(':id/checkout')
-  checkout(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-    @Body() dto: CheckoutDto,
-  ) {
+  checkout(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string, @Body() dto: CheckoutDto) {
     return this.eventsService.checkout(organizer.sub, id, dto);
   }
 
-  @Get(':id/qr.png')
-  async getQrPng(
+  @Post(':id/extras')
+  addExtras(
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
-    @Res() res: Response,
+    @Body() body: { extraIds: string[] },
   ) {
+    return this.eventsService.addExtras(organizer.sub, id, body);
+  }
+
+  @Get(':id/qr.png')
+  async getQrPng(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string, @Res() res: Response) {
     const buffer = await this.eventsService.generateQrPng(organizer.sub, id);
     res.setHeader('Content-Type', 'image/png');
     res.send(buffer);
   }
 
   @Get(':id/qr-card.pdf')
-  async getQrCardPdf(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-    @Res() res: Response,
-  ) {
+  async getQrCardPdf(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string, @Res() res: Response) {
     const buffer = await this.eventsService.generateQrCardPdf(organizer.sub, id);
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', 'inline; filename="qr-card.pdf"');
@@ -99,18 +84,12 @@ export class EventsController {
   }
 
   @Get(':id/payment')
-  getPayment(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  getPayment(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.getPayment(organizer.sub, id);
   }
 
   @Get(':id/stats')
-  getStats(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  getStats(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.getStats(organizer.sub, id);
   }
 
@@ -118,15 +97,28 @@ export class EventsController {
   getGallery(
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+    @Query('mediaType') mediaType?: string,
   ) {
-    return this.eventsService.getGallery(organizer.sub, id);
+    return this.eventsService.getGallery(organizer.sub, id, {
+      cursor,
+      limit: limit ? parseInt(limit, 10) : undefined,
+      mediaType,
+    });
+  }
+
+  @Get(':id/submissions/:sid/download')
+  getSubmissionDownload(
+    @CurrentOrganizer() organizer: OrganizerPayload,
+    @Param('id') id: string,
+    @Param('sid') sid: string,
+  ) {
+    return this.eventsService.getSubmissionDownload(organizer.sub, id, sid);
   }
 
   @Get(':id/guests')
-  getGuests(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  getGuests(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.getGuests(organizer.sub, id);
   }
 
@@ -161,19 +153,12 @@ export class EventsController {
   }
 
   @Post(':id/exports')
-  createExport(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-  ) {
+  createExport(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.createExport(organizer.sub, id);
   }
 
   @Get(':id/exports/:eid')
-  getExport(
-    @CurrentOrganizer() organizer: OrganizerPayload,
-    @Param('id') id: string,
-    @Param('eid') eid: string,
-  ) {
+  getExport(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string, @Param('eid') eid: string) {
     return this.eventsService.getExport(organizer.sub, id, eid);
   }
 }
