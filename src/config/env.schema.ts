@@ -21,6 +21,7 @@ export const envSchema = Joi.object({
   R2_ACCESS_KEY_ID: Joi.string().default(''),
   R2_SECRET_ACCESS_KEY: Joi.string().default(''),
   R2_BUCKET: Joi.string().default(''),
+  R2_ENDPOINT: Joi.string().default(''),
   PAYMENT_PROVIDER: Joi.string().valid('proxypay', 'manual').default('manual'),
   PROXYPAY_API_KEY: Joi.string().default(''),
   PROXYPAY_WEBHOOK_SECRET: Joi.string().default(''),
@@ -29,5 +30,6 @@ export const envSchema = Joi.object({
   EMAIL_PROVIDER: Joi.string().valid('console').default('console'),
   EMAIL_API_KEY: Joi.string().default(''),
   SENTRY_DSN: Joi.string().default(''),
-  ADMIN_SECRET: Joi.string().default(''),
+  ADMIN_PHONE: Joi.string().allow('').default(''),
+  ADMIN_SECRET: Joi.string().allow('').default(''),
 });

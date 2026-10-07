@@ -3,6 +3,7 @@ import { Request } from 'express';
 
 export interface OrganizerPayload {
   sub: string;
+  isAdmin: boolean;
   email?: string;
   phone?: string;
 }

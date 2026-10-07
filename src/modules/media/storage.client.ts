@@ -30,11 +30,14 @@ export class StorageClient implements IStorageClient {
     const accessKeyId = config.get<string>('R2_ACCESS_KEY_ID') ?? '';
     const secretAccessKey = config.get<string>('R2_SECRET_ACCESS_KEY') ?? '';
     this.bucket = config.get<string>('R2_BUCKET') ?? '';
+    const endpoint =
+      config.get<string>('R2_ENDPOINT') ??
+      `https://${accountId}.r2.cloudflarestorage.com`;
 
     if (accountId && accessKeyId && secretAccessKey && this.bucket) {
       this.s3 = new S3Client({
         region: 'auto',
-        endpoint: `https://${accountId}.r2.cloudflarestorage.com`,
+        endpoint,
         credentials: { accessKeyId, secretAccessKey },
       });
     }

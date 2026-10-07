@@ -15,6 +15,7 @@ import type { Notifier } from '../notifications/notifier.interface.js';
 import { RequestOtpDto } from './dto/request-otp.dto.js';
 import { VerifyOtpDto } from './dto/verify-otp.dto.js';
 import { UpdateOrganizerDto } from '../organizers/dto/update-organizer.dto.js';
+import { AdminLoginDto } from './dto/admin-login.dto.js';
 
 const OTP_THROTTLE_WINDOW_MS = 10 * 60 * 1000;
 const OTP_MAX_PER_WINDOW = 3;
@@ -124,6 +125,21 @@ export class AuthService {
     return { ...tokens, organizer };
   }
 
+  async verifySession(refreshToken: string) {
+    const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
+    const stored = await this.prisma.refreshToken.findUnique({
+      where: { tokenHash },
+      include: { organizer: { select: { isAdmin: true } } },
+    });
+    if (!stored || stored.expiresAt <= new Date()) {
+      throw new UnauthorizedException({
+        code: 'SESSION_INVALID',
+        message: 'Sessão inválida ou expirada.',
+      });
+    }
+    return { valid: true, isAdmin: stored.organizer.isAdmin ?? false };
+  }
+
   async refresh(refreshToken: string) {
     const tokenHash = createHash('sha256').update(refreshToken).digest('hex');
 
@@ -148,12 +164,40 @@ export class AuthService {
     return organizer;
   }
 
+  async adminLogin(dto: AdminLoginDto) {
+    const adminPhone = this.config.get<string>('ADMIN_PHONE') ?? '';
+    const adminSecret = this.config.get<string>('ADMIN_SECRET') ?? '';
+
+    if (!adminPhone || !adminSecret || dto.phone !== adminPhone || dto.password !== adminSecret) {
+      throw new UnauthorizedException({ code: 'ADMIN_INVALID_CREDENTIALS', message: 'Credenciais inválidas.' });
+    }
+
+    // Garante que o organizer admin existe na BD
+    let organizer = await this.prisma.organizer.findFirst({ where: { phone: adminPhone } });
+    if (!organizer) {
+      organizer = await this.prisma.organizer.create({
+        data: { name: 'Admin', phone: adminPhone, isAdmin: true },
+      });
+    } else if (!organizer.isAdmin) {
+      organizer = await this.prisma.organizer.update({
+        where: { id: organizer.id },
+        data: { isAdmin: true },
+      });
+    }
+
+    return this.issueTokens(organizer.id);
+  }
+
   async updateMe(organizerId: string, dto: UpdateOrganizerDto) {
     return this.prisma.organizer.update({ where: { id: organizerId }, data: dto });
   }
 
   private async issueTokens(organizerId: string) {
-    const payload = { sub: organizerId };
+    const organizer = await this.prisma.organizer.findUnique({
+      where: { id: organizerId },
+      select: { isAdmin: true },
+    });
+    const payload = { sub: organizerId, isAdmin: organizer?.isAdmin ?? false };
     const accessToken = await this.jwtService.signAsync(payload, {
       secret: this.config.get<string>('JWT_ACCESS_SECRET'),
       expiresIn: ACCESS_TOKEN_TTL,

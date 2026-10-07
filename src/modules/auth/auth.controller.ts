@@ -14,6 +14,7 @@ import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { RequestOtpDto } from './dto/request-otp.dto.js';
 import { VerifyOtpDto } from './dto/verify-otp.dto.js';
+import { AdminLoginDto } from './dto/admin-login.dto.js';
 import { JwtGuard } from './guards/jwt.guard.js';
 import { CurrentOrganizer } from '../../common/decorators/current-organizer.decorator.js';
 import type { OrganizerPayload } from '../../common/decorators/current-organizer.decorator.js';
@@ -51,6 +52,34 @@ export class AuthController {
       path: '/',
     });
     return { accessToken: result.accessToken, organizer: result.organizer };
+  }
+
+  @Post('auth/admin-login')
+  async adminLogin(
+    @Body() dto: AdminLoginDto,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.authService.adminLogin(dto);
+    res.cookie(REFRESH_COOKIE, result.refreshToken, {
+      httpOnly: true,
+      secure: process.env['NODE_ENV'] === 'production',
+      sameSite: 'lax',
+      maxAge: REFRESH_TTL_MS,
+      path: '/',
+    });
+    return { accessToken: result.accessToken };
+  }
+
+  @Post('auth/verify-session')
+  async verifySession(@Req() req: Request) {
+    const token = (req.cookies as Record<string, string>)?.[REFRESH_COOKIE];
+    if (!token) {
+      throw new UnauthorizedException({
+        code: 'SESSION_MISSING',
+        message: 'Sessão não encontrada.',
+      });
+    }
+    return this.authService.verifySession(token);
   }
 
   @Post('auth/refresh')
