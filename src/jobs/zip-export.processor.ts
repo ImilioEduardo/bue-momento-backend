@@ -2,7 +2,7 @@ import { Inject, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
 import { Readable } from 'stream';
-import { ZipArchive } from 'archiver';
+import archiver from 'archiver';
 import type { ArchiverError } from 'archiver';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StreamClient } from '../modules/media/stream.client.js';
@@ -77,7 +77,7 @@ export class ZipExportProcessor extends WorkerHost {
     }
 
     // Pipe archive output stream directly into S3 multipart upload — ≤512 MB RAM
-    const archive = new ZipArchive({ zlib: { level: 6 } });
+    const archive = archiver('zip', { zlib: { level: 6 } });
 
     const uploadPromise = this.storage.streamUpload(r2Key, archive, 'application/zip');
 
