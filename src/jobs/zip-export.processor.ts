@@ -1,7 +1,7 @@
 import { Inject, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
-import { PassThrough } from 'stream';
+import { PassThrough, Readable } from 'stream';
 import { ZipArchive } from 'archiver';
 import type { ArchiverError } from 'archiver';
 import { PrismaService } from '../prisma/prisma.service.js';
