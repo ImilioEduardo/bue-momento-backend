@@ -409,7 +409,7 @@ export class EventsService {
 
     const guests = await this.prisma.guest.findMany({
       where: { eventId },
-      include: { _count: { select: { assignments: true } } },
+      include: { _count: { select: { assignments: { where: { status: 'DONE' } } } } },
       orderBy: { createdAt: 'asc' },
     });
 

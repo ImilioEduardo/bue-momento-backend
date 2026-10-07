@@ -43,6 +43,12 @@ export class PublicController {
   }
 
   @UseGuards(GuestJwtGuard)
+  @Get('events/:code/assignments')
+  getAssignments(@CurrentGuest() guest: GuestPayload) {
+    return this.svc.getAssignments(guest.sub, guest.eventId);
+  }
+
+  @UseGuards(GuestJwtGuard)
   @Get('assignments/:aid')
   getAssignment(@Param('aid') aid: string, @CurrentGuest() guest: GuestPayload) {
     return this.svc.getAssignment(guest.sub, guest.eventId, aid);
