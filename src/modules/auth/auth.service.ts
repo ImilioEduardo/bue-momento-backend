@@ -166,9 +166,9 @@ export class AuthService {
 
   async adminLogin(dto: AdminLoginDto) {
     const adminPhone = this.config.get<string>('ADMIN_PHONE') ?? '';
-    const adminSecret = this.config.get<string>('ADMIN_SECRET') ?? '';
+    const adminPassword = this.config.get<string>('ADMIN_PASSWORD') ?? '';
 
-    if (!adminPhone || !adminSecret || dto.phone !== adminPhone || dto.password !== adminSecret) {
+    if (!adminPhone || !adminPassword || dto.phone !== adminPhone || dto.password !== adminPassword) {
       throw new UnauthorizedException({ code: 'ADMIN_INVALID_CREDENTIALS', message: 'Credenciais inválidas.' });
     }
 

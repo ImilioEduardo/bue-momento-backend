@@ -33,4 +33,5 @@ export const envSchema = Joi.object({
   SENTRY_DSN: Joi.string().default(''),
   ADMIN_PHONE: Joi.string().allow('').default(''),
   ADMIN_SECRET: Joi.string().allow('').default(''),
+  ADMIN_PASSWORD: Joi.string().allow('').default(''),
 });
