@@ -2,7 +2,7 @@
 set -e
 
 echo "[start] Running database migrations..."
-npx prisma migrate deploy
+./node_modules/.bin/prisma migrate deploy
 
 if [ "$SERVICE" = "worker" ]; then
   echo "[start] Starting worker process..."
