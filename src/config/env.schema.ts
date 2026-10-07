@@ -9,7 +9,7 @@ export const envSchema = Joi.object({
   REDIS_URL: Joi.string().default('redis://localhost:6379'),
   JWT_ACCESS_SECRET: Joi.string().min(32).required(),
   JWT_REFRESH_SECRET: Joi.string().min(32).required(),
-  JWT_GUEST_SECRET: Joi.string().min(32).default('dev_guest_secret_change_in_production_32ch'),
+  JWT_GUEST_SECRET: Joi.string().min(32).required(),
   WEB_URL: Joi.string().uri().required(),
   PUBLIC_WEB_URL: Joi.string().uri().required(),
   CF_ACCOUNT_ID: Joi.string().default(''),

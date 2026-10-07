@@ -10,6 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { RequestOtpDto } from './dto/request-otp.dto.js';
@@ -33,6 +34,7 @@ export class AuthController {
     return this.authService.checkContact(dto.contact);
   }
 
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   @Post('auth/otp/request')
   requestOtp(@Body() dto: RequestOtpDto) {
     return this.authService.requestOtp(dto);
@@ -54,6 +56,7 @@ export class AuthController {
     return { accessToken: result.accessToken, organizer: result.organizer };
   }
 
+  @Throttle({ default: { ttl: 60000, limit: 5 } })
   @Post('auth/admin-login')
   async adminLogin(
     @Body() dto: AdminLoginDto,

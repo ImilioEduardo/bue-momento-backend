@@ -22,14 +22,16 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  const swaggerConfig = new DocumentBuilder()
-    .setTitle('Bué Momentos API')
-    .setDescription('API para gestão de desafios em vídeo para eventos')
-    .setVersion('1.0')
-    .addBearerAuth()
-    .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
-  SwaggerModule.setup('docs', app, document);
+  if (process.env['NODE_ENV'] !== 'production') {
+    const swaggerConfig = new DocumentBuilder()
+      .setTitle('Bué Momentos API')
+      .setDescription('API para gestão de desafios em vídeo para eventos')
+      .setVersion('1.0')
+      .addBearerAuth()
+      .build();
+    const document = SwaggerModule.createDocument(app, swaggerConfig);
+    SwaggerModule.setup('docs', app, document);
+  }
 
   await app.listen(process.env['PORT'] ?? 3001);
 }

@@ -42,9 +42,6 @@ lerna-debug.log*
 .env.production.local
 .env.local
 
-# Prisma migrations are tracked but keep placeholder
-prisma/migrations/
-!prisma/migrations/.gitkeep
 
 # temp directory
 .temp
