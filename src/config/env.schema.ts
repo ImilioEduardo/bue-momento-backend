@@ -3,7 +3,8 @@ import Joi from 'joi';
 export const envSchema = Joi.object({
   NODE_ENV: Joi.string()
     .valid('development', 'production', 'test')
-    .default('development'),
+    .empty('')
+    .default('production'),
   PORT: Joi.number().default(3001),
   DATABASE_URL: Joi.string().required(),
   REDIS_URL: Joi.string().default('redis://localhost:6379'),
