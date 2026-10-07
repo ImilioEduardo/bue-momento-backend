@@ -1,8 +1,8 @@
 import { Inject, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import type { Job } from 'bullmq';
-import { Readable } from 'stream';
-import archiver from 'archiver';
+import { PassThrough } from 'stream';
+import { ZipArchive } from 'archiver';
 import type { ArchiverError } from 'archiver';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { StreamClient } from '../modules/media/stream.client.js';
@@ -76,10 +76,14 @@ export class ZipExportProcessor extends WorkerHost {
       return;
     }
 
-    // Pipe archive output stream directly into S3 multipart upload — ≤512 MB RAM
-    const archive = archiver('zip', { zlib: { level: 6 } });
+    // ZipArchive uses readable-stream (not Node built-in), which fails instanceof Readable in the
+    // AWS SDK. Pipe through a native PassThrough so the SDK's instanceof check passes.
+    const archive = new ZipArchive({ zlib: { level: 6 } });
+    const passthrough = new PassThrough();
+    archive.pipe(passthrough);
+    archive.on('error', (err: ArchiverError) => passthrough.destroy(err));
 
-    const uploadPromise = this.storage.streamUpload(r2Key, archive, 'application/zip');
+    const uploadPromise = this.storage.streamUpload(r2Key, passthrough, 'application/zip');
 
     archive.on('warning', (err: ArchiverError) => {
       if (err.code !== 'ENOENT') this.logger.warn(`Archiver warning: ${err.message}`);
