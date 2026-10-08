@@ -1,5 +1,7 @@
 import {
   ConflictException,
+  HttpException,
+  HttpStatus,
   Inject,
   Injectable,
   NotFoundException,
@@ -8,7 +10,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomInt } from 'crypto';
+import { safeEqual } from '../../common/security/safe-compare.js';
+import { normalizeContact } from './contact.util.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { NOTIFIER } from '../notifications/notifier.interface.js';
 import type { Notifier } from '../notifications/notifier.interface.js';
@@ -19,7 +23,11 @@ import { AdminLoginDto } from './dto/admin-login.dto.js';
 
 const OTP_THROTTLE_WINDOW_MS = 10 * 60 * 1000;
 const OTP_MAX_PER_WINDOW = 3;
+const OTP_DAY_MS = 24 * 60 * 60 * 1000;
+const OTP_MAX_PER_DAY = 10;
 const OTP_MAX_ATTEMPTS = 5;
+const ADMIN_LOCK_WINDOW_MS = 15 * 60 * 1000;
+const ADMIN_MAX_FAILURES = 5;
 const ACCESS_TOKEN_TTL = '15m';
 const REFRESH_TOKEN_TTL_DAYS = 30;
 
@@ -32,7 +40,16 @@ export class AuthService {
     @Inject(NOTIFIER) private readonly notifier: Notifier,
   ) {}
 
-  async checkContact(contact: string): Promise<{ exists: boolean }> {
+  // Falhas recentes de login de admin (memória do processo; há um único admin)
+  private adminFailures: number[] = [];
+
+  private otpInvalid() {
+    // Mensagem única para não revelar se existe um código activo para o contacto
+    return new UnauthorizedException({ code: 'OTP_INVALID', message: 'Código inválido ou expirado.' });
+  }
+
+  async checkContact(rawContact: string): Promise<{ exists: boolean }> {
+    const contact = normalizeContact(rawContact);
     const isEmail = contact.includes('@');
     const organizer = await this.prisma.organizer.findFirst({
       where: isEmail ? { email: contact } : { phone: contact },
@@ -42,81 +59,91 @@ export class AuthService {
   }
 
   async requestOtp(dto: RequestOtpDto): Promise<{ message: string }> {
-    const windowStart = new Date(Date.now() - OTP_THROTTLE_WINDOW_MS);
-    const recentCount = await this.prisma.otpCode.count({
-      where: { target: dto.contact, createdAt: { gte: windowStart } },
-    });
-    if (recentCount >= OTP_MAX_PER_WINDOW) {
+    const contact = normalizeContact(dto.contact);
+    const now = Date.now();
+    const [recentCount, dayCount] = await Promise.all([
+      this.prisma.otpCode.count({
+        where: { target: contact, createdAt: { gte: new Date(now - OTP_THROTTLE_WINDOW_MS) } },
+      }),
+      this.prisma.otpCode.count({
+        where: { target: contact, createdAt: { gte: new Date(now - OTP_DAY_MS) } },
+      }),
+    ]);
+    if (recentCount >= OTP_MAX_PER_WINDOW || dayCount >= OTP_MAX_PER_DAY) {
       throw new ConflictException({
         code: 'OTP_RATE_LIMIT',
-        message: 'Demasiados pedidos. Tenta novamente em 10 minutos.',
+        message: 'Demasiados pedidos. Tenta novamente mais tarde.',
       });
     }
 
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    // Gerador criptograficamente seguro (Math.random é previsível)
+    const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const codeHash = await bcrypt.hash(code, 10);
-    const expiresAt = new Date(Date.now() + OTP_THROTTLE_WINDOW_MS);
+    const expiresAt = new Date(now + OTP_THROTTLE_WINDOW_MS);
 
-    await this.prisma.otpCode.create({
-      data: { target: dto.contact, codeHash, expiresAt },
+    // Invalida códigos anteriores ainda activos. Não se apagam as linhas porque são
+    // elas que contam para o limite por janela/dia.
+    await this.prisma.otpCode.updateMany({
+      where: { target: contact, expiresAt: { gt: new Date(now) } },
+      data: { expiresAt: new Date(now) },
     });
 
-    const isEmail = dto.contact.includes('@');
+    await this.prisma.otpCode.create({
+      data: { target: contact, codeHash, expiresAt },
+    });
+
+    const isEmail = contact.includes('@');
     if (isEmail) {
       await this.notifier.sendEmail(
-        dto.contact,
+        contact,
         'O teu código de acesso — Bué Momentos',
         `<p>O teu código é: <strong>${code}</strong></p><p>Válido por 10 minutos.</p>`,
       );
     } else {
-      await this.notifier.sendSms(dto.contact, `Bué Momentos: o teu código é ${code}. Válido 10 min.`);
+      await this.notifier.sendSms(contact, `Bué Momentos: o teu código é ${code}. Válido 10 min.`);
     }
 
     return { message: 'Código enviado com sucesso.' };
   }
 
   async verifyOtp(dto: VerifyOtpDto) {
+    const contact = normalizeContact(dto.contact);
     const otpRecord = await this.prisma.otpCode.findFirst({
       where: {
-        target: dto.contact,
+        target: contact,
         expiresAt: { gt: new Date() },
         attempts: { lt: OTP_MAX_ATTEMPTS },
       },
       orderBy: { createdAt: 'desc' },
     });
 
-    if (!otpRecord) {
-      throw new UnauthorizedException({
-        code: 'OTP_INVALID',
-        message: 'Código inválido ou expirado.',
-      });
-    }
+    if (!otpRecord) throw this.otpInvalid();
 
-    await this.prisma.otpCode.update({
-      where: { id: otpRecord.id },
+    // Incremento atómico e condicional ANTES de comparar: pedidos em paralelo já não
+    // conseguem ultrapassar o limite de tentativas (antes: ler → comparar → incrementar).
+    const { count } = await this.prisma.otpCode.updateMany({
+      where: { id: otpRecord.id, attempts: { lt: OTP_MAX_ATTEMPTS } },
       data: { attempts: { increment: 1 } },
     });
+    if (count === 0) throw this.otpInvalid();
 
     const valid = await bcrypt.compare(dto.code, otpRecord.codeHash);
-    if (!valid) {
-      throw new UnauthorizedException({
-        code: 'OTP_INVALID',
-        message: 'Código incorreto.',
-      });
-    }
+    if (!valid) throw this.otpInvalid();
 
-    await this.prisma.otpCode.delete({ where: { id: otpRecord.id } });
+    // Consumo atómico: se outro pedido já usou este código, este falha.
+    const consumed = await this.prisma.otpCode.deleteMany({ where: { id: otpRecord.id } });
+    if (consumed.count === 0) throw this.otpInvalid();
 
-    const isEmail = dto.contact.includes('@');
+    const isEmail = contact.includes('@');
     let organizer = await this.prisma.organizer.findFirst({
-      where: isEmail ? { email: dto.contact } : { phone: dto.contact },
+      where: isEmail ? { email: contact } : { phone: contact },
     });
 
     if (!organizer) {
       organizer = await this.prisma.organizer.create({
         data: {
           name: '',
-          ...(isEmail ? { email: dto.contact } : { phone: dto.contact }),
+          ...(isEmail ? { email: contact } : { phone: contact }),
         },
       });
     }
@@ -168,9 +195,23 @@ export class AuthService {
     const adminPhone = this.config.get<string>('ADMIN_PHONE') ?? '';
     const adminPassword = this.config.get<string>('ADMIN_PASSWORD') ?? '';
 
-    if (!adminPhone || !adminPassword || dto.phone !== adminPhone || dto.password !== adminPassword) {
+    const now = Date.now();
+    this.adminFailures = this.adminFailures.filter((t) => now - t < ADMIN_LOCK_WINDOW_MS);
+    if (this.adminFailures.length >= ADMIN_MAX_FAILURES) {
+      throw new HttpException(
+        { code: 'ADMIN_LOCKED', message: 'Demasiadas tentativas. Tenta novamente dentro de 15 minutos.' },
+        HttpStatus.TOO_MANY_REQUESTS,
+      );
+    }
+
+    // Comparação em tempo constante (avalia sempre as duas para não revelar qual falhou)
+    const phoneOk = safeEqual(dto.phone, adminPhone);
+    const passwordOk = safeEqual(dto.password, adminPassword);
+    if (!adminPhone || !adminPassword || !phoneOk || !passwordOk) {
+      this.adminFailures.push(now);
       throw new UnauthorizedException({ code: 'ADMIN_INVALID_CREDENTIALS', message: 'Credenciais inválidas.' });
     }
+    this.adminFailures = [];
 
     // Garante que o organizer admin existe na BD
     let organizer = await this.prisma.organizer.findFirst({ where: { phone: adminPhone } });

@@ -10,6 +10,8 @@ export interface PaymentEvent {
   reference: string;
   status: 'PAID' | 'EXPIRED';
   paidAt?: Date;
+  /** Montante reportado pelo provedor (Kz). Obrigatório para confirmar PAID. */
+  amount?: number;
 }
 
 export interface IPaymentProvider {

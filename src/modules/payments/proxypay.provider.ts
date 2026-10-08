@@ -1,6 +1,7 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHmac } from 'crypto';
+import { createHmac, randomInt } from 'crypto';
+import { safeEqual } from '../../common/security/safe-compare.js';
 import type { IPaymentProvider, PaymentEvent, PaymentReference } from './payment-provider.interface.js';
 
 const PROXYPAY_BASE_URL = 'https://api.proxypay.co.ao';
@@ -12,8 +13,9 @@ interface ProxyPayReferenceResponse {
 }
 
 interface ProxyPayWebhookBody {
-  id: string;
-  amount?: number;
+  id?: string | number;
+  reference_id?: string | number;
+  amount?: number | string;
   datetime?: string;
   event_type?: string;
 }
@@ -40,7 +42,7 @@ export class ProxyPayProvider implements IPaymentProvider {
       this.logger.warn('PROXYPAY_API_KEY not configured — using dev fallback reference');
       return {
         entity: MULTICAIXA_ENTITY,
-        reference: Math.random().toString().slice(2, 12),
+        reference: String(randomInt(1_000_000_000, 10_000_000_000)),
         expiresAt,
       };
     }
@@ -62,30 +64,37 @@ export class ProxyPayProvider implements IPaymentProvider {
     return { entity: MULTICAIXA_ENTITY, reference: data.id, expiresAt };
   }
 
+  // Falha fechado: sem segredo não se aceita nenhum webhook.
+  // A assinatura (HMAC-SHA256 do corpo bruto) é verificada ANTES de interpretar o JSON.
   verifyWebhook(rawBody: Buffer, headers: Record<string, string>): PaymentEvent {
-    const body = JSON.parse(rawBody.toString('utf8')) as ProxyPayWebhookBody;
-    const secret = this.webhookSecret;
-
-    if (secret) {
-      const sig = headers['x-proxypay-signature'] ?? headers['x-signature'] ?? '';
-      const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-      if (sig !== expected) {
-        throw new UnauthorizedException({ code: 'PROXYPAY_SIGNATURE_INVALID' });
-      }
-    } else if (this.apiKey) {
-      // Fallback: verify Basic auth header matches API key
-      const authHeader = headers['authorization'] ?? '';
-      const expectedAuth = `Basic ${Buffer.from(`${this.apiKey}:`).toString('base64')}`;
-      if (authHeader !== expectedAuth) {
-        throw new UnauthorizedException({ code: 'PROXYPAY_AUTH_INVALID' });
-      }
+    const secret = this.webhookSecret || this.apiKey;
+    if (!secret) {
+      throw new UnauthorizedException({ code: 'PROXYPAY_WEBHOOK_NOT_CONFIGURED' });
     }
 
+    const sig = String(headers['x-signature'] ?? headers['x-proxypay-signature'] ?? '').trim().toLowerCase();
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    if (!sig || !safeEqual(sig, expected)) {
+      throw new UnauthorizedException({ code: 'PROXYPAY_SIGNATURE_INVALID' });
+    }
+
+    let body: ProxyPayWebhookBody;
+    try {
+      body = JSON.parse(rawBody.toString('utf8')) as ProxyPayWebhookBody;
+    } catch {
+      throw new BadRequestException({ code: 'WEBHOOK_BODY_INVALID' });
+    }
+
+    const reference = String(body.reference_id ?? body.id ?? '');
+    if (!reference) throw new BadRequestException({ code: 'WEBHOOK_REFERENCE_MISSING' });
+
     const isExpiry = body.event_type === 'expiry';
+    const amount = body.amount != null ? Number(body.amount) : undefined;
     return {
-      reference: body.id,
+      reference,
       status: isExpiry ? 'EXPIRED' : 'PAID',
       paidAt: isExpiry ? undefined : (body.datetime ? new Date(body.datetime) : new Date()),
+      amount: Number.isFinite(amount) ? amount : undefined,
     };
   }
 }

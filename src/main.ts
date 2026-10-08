@@ -1,5 +1,6 @@
 import './instrument.js';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
@@ -9,7 +10,11 @@ import { AppModule } from './app.module.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true, rawBody: true });
+
+  // Railway/Vercel ficam à frente da API: confiar no 1.º proxy para que req.ip seja o IP real
+  // do cliente (necessário para o rate limit por IP).
+  app.set('trust proxy', Number(process.env['TRUST_PROXY_HOPS'] ?? 1));
 
   app.useLogger(app.get(Logger));
   app.use(helmet());

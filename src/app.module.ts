@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { BullModule } from '@nestjs/bullmq';
 import { LoggerModule } from 'nestjs-pino';
@@ -16,6 +17,7 @@ import { PublicModule } from './modules/public/public.module.js';
 import { AdminModule } from './modules/admin/admin.module.js';
 import { WebhooksModule } from './modules/webhooks/webhooks.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
+import { AppThrottlerGuard } from './common/guards/app-throttler.guard.js';
 
 @Module({
   imports: [
@@ -25,13 +27,27 @@ import { JobsModule } from './jobs/jobs.module.js';
     }),
     LoggerModule.forRoot({
       pinoHttp: {
+        // Nunca escrever credenciais nos logs (o serializer por omissão inclui todos os headers)
+        redact: {
+          paths: [
+            'req.headers.authorization',
+            'req.headers.cookie',
+            'req.headers["x-admin-secret"]',
+            'req.headers["x-signature"]',
+            'req.headers["x-proxypay-signature"]',
+            'req.headers["webhook-signature"]',
+            'res.headers["set-cookie"]',
+          ],
+          censor: '[REDACTED]',
+        },
         transport:
           process.env['NODE_ENV'] !== 'production'
             ? { target: 'pino-pretty', options: { singleLine: true } }
             : undefined,
       },
     }),
-    ThrottlerModule.forRoot([{ ttl: 60000, limit: 100 }]),
+    // Limite por omissão: 120 pedidos/min por token (ou IP). Rotas sensíveis têm @Throttle próprio.
+    ThrottlerModule.forRoot([{ ttl: 60000, limit: 120 }]),
     ScheduleModule.forRoot(),
     BullModule.forRootAsync({
       inject: [ConfigService],
@@ -50,6 +66,10 @@ import { JobsModule } from './jobs/jobs.module.js';
     AdminModule,
     WebhooksModule,
     JobsModule,
+  ],
+  providers: [
+    // Sem isto os @Throttle() não tinham efeito nenhum
+    { provide: APP_GUARD, useClass: AppThrottlerGuard },
   ],
 })
 export class AppModule {}

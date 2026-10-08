@@ -10,7 +10,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Throttle } from '@nestjs/throttler';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service.js';
 import { RequestOtpDto } from './dto/request-otp.dto.js';
@@ -29,6 +29,7 @@ const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
+  @Throttle({ default: { ttl: 60000, limit: 10 } })
   @Post('auth/check')
   checkContact(@Body() dto: RequestOtpDto) {
     return this.authService.checkContact(dto.contact);
@@ -40,6 +41,10 @@ export class AuthController {
     return this.authService.requestOtp(dto);
   }
 
+  // Chamado a partir do servidor Next.js (todos os pedidos chegam com o IP da Vercel), por isso
+  // não se limita por IP aqui: o limite é por contacto, aplicado no AuthService
+  // (tentativas atómicas por código + máximo de códigos por janela e por dia).
+  @SkipThrottle()
   @Post('auth/otp/verify')
   async verifyOtp(
     @Body() dto: VerifyOtpDto,
@@ -56,7 +61,8 @@ export class AuthController {
     return { accessToken: result.accessToken, organizer: result.organizer };
   }
 
-  @Throttle({ default: { ttl: 60000, limit: 5 } })
+  // Também chamado a partir do servidor Next.js; o bloqueio após falhas está no AuthService.
+  @SkipThrottle()
   @Post('auth/admin-login')
   async adminLogin(
     @Body() dto: AdminLoginDto,
@@ -73,6 +79,8 @@ export class AuthController {
     return { accessToken: result.accessToken };
   }
 
+  // Chamado pelo proxy do Next.js em cada pedido /admin; o token tem 256 bits (sem brute force útil).
+  @SkipThrottle()
   @Post('auth/verify-session')
   async verifySession(@Req() req: Request) {
     const token = (req.cookies as Record<string, string>)?.[REFRESH_COOKIE];
@@ -85,6 +93,7 @@ export class AuthController {
     return this.authService.verifySession(token);
   }
 
+  @SkipThrottle()
   @Post('auth/refresh')
   async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const token = (req.cookies as Record<string, string>)?.[REFRESH_COOKIE];

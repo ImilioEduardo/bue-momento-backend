@@ -12,6 +12,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request, Response } from 'express';
 import { PublicService } from './public.service.js';
 import { JoinEventDto } from './dto/join-event.dto.js';
@@ -30,6 +31,8 @@ export class PublicController {
     return this.svc.getPublicEvent(code);
   }
 
+  // Limite por IP: generoso porque muitos convidados partilham o Wi-Fi do evento
+  @Throttle({ default: { ttl: 60000, limit: 30 } })
   @Post('events/:code/join')
   joinEvent(@Param('code') code: string, @Body() dto: JoinEventDto) {
     return this.svc.joinEvent(code, dto);

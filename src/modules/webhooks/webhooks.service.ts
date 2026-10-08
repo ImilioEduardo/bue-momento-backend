@@ -1,6 +1,10 @@
-import { Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHmac } from 'crypto';
+import { safeEqual } from '../../common/security/safe-compare.js';
+
+// Tolerância para o timestamp da assinatura do Stream (anti-replay)
+const STREAM_SIGNATURE_TOLERANCE_SEC = 5 * 60;
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { StreamClient } from '../media/stream.client.js';
 import { PaymentsService } from '../payments/payments.service.js';
@@ -31,7 +35,10 @@ export class WebhooksService {
   // Signature = HMAC-SHA256(secret, "<time>.<rawBody>")
   verifyStreamSignature(rawBody: Buffer, signatureHeader: string | undefined): void {
     const secret = this.config.get<string>('STREAM_WEBHOOK_SECRET') ?? '';
-    if (!secret) return;
+    // Falha fechado: sem segredo configurado nenhum webhook é aceite
+    if (!secret) {
+      throw new UnauthorizedException({ code: 'WEBHOOK_NOT_CONFIGURED' });
+    }
 
     if (!signatureHeader) {
       throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_MISSING' });
@@ -49,11 +56,17 @@ export class WebhooksService {
       throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_MALFORMED' });
     }
 
+    const ts = Number(time);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (!Number.isFinite(ts) || Math.abs(nowSec - ts) > STREAM_SIGNATURE_TOLERANCE_SEC) {
+      throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_EXPIRED' });
+    }
+
     const expected = createHmac('sha256', secret)
       .update(`${time}.${rawBody.toString('utf8')}`)
       .digest('hex');
 
-    if (expected !== sig1) {
+    if (!safeEqual(sig1.toLowerCase(), expected)) {
       throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_INVALID' });
     }
   }
@@ -150,6 +163,13 @@ export class WebhooksService {
     }
 
     if (event.status === 'PAID') {
+      // O montante pago tem de corresponder exactamente ao valor da referência
+      if (event.amount === undefined || Math.round(event.amount) !== payment.amountKz) {
+        this.logger.error(
+          `Payment webhook amount mismatch for payment ${payment.id}: expected ${payment.amountKz}, got ${event.amount ?? 'none'}`,
+        );
+        throw new BadRequestException({ code: 'PAYMENT_AMOUNT_MISMATCH' });
+      }
       await this.paymentsService.applyPayment(payment.id);
       this.logger.log(`Payment ${payment.id} confirmed via webhook (ref=${event.reference})`);
     } else if (event.status === 'EXPIRED' && payment.status === 'PENDING') {

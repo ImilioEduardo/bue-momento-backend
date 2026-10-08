@@ -1,9 +1,12 @@
 import { Controller, Get, HttpCode, HttpStatus, Param, Post, UseGuards } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { SkipThrottle } from '@nestjs/throttler';
 import { AdminGuard } from './guards/admin.guard.js';
 import { AdminService } from './admin.service.js';
 
 @ApiTags('admin')
+// Chamado só a partir do servidor Next.js (IP partilhado) e já protegido pelo AdminGuard
+@SkipThrottle()
 @UseGuards(AdminGuard)
 @Controller('admin')
 export class AdminController {
