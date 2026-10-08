@@ -1,11 +1,14 @@
 import {
   Body,
   Controller,
+  DefaultValuePipe,
   Delete,
   Get,
   HttpCode,
   HttpStatus,
   Param,
+  ParseEnumPipe,
+  ParseIntPipe,
   Patch,
   Post,
   Query,
@@ -13,6 +16,8 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
+import { MediaType } from '@prisma/client';
 import type { Response } from 'express';
 import { JwtGuard } from '../auth/guards/jwt.guard.js';
 import { CurrentOrganizer } from '../../common/decorators/current-organizer.decorator.js';
@@ -20,7 +25,9 @@ import type { OrganizerPayload } from '../../common/decorators/current-organizer
 import { EventsService } from './events.service.js';
 import { CreateEventDto } from './dto/create-event.dto.js';
 import { UpdateEventDto } from './dto/update-event.dto.js';
-import { CheckoutDto } from './dto/checkout.dto.js';
+import { AddExtrasDto, CheckoutDto } from './dto/checkout.dto.js';
+import { ModerateSubmissionDto } from './dto/moderate-submission.dto.js';
+import { UpdateGuestDto } from './dto/update-guest.dto.js';
 
 @ApiTags('events')
 @ApiBearerAuth()
@@ -63,9 +70,9 @@ export class EventsController {
   addExtras(
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
-    @Body() body: { extraIds: string[] },
+    @Body() dto: AddExtrasDto,
   ) {
-    return this.eventsService.addExtras(organizer.sub, id, body);
+    return this.eventsService.addExtras(organizer.sub, id, dto);
   }
 
   @Get(':id/qr.png')
@@ -97,13 +104,13 @@ export class EventsController {
   getGallery(
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+    @Query('mediaType', new ParseEnumPipe(MediaType, { optional: true })) mediaType?: MediaType,
     @Query('cursor') cursor?: string,
-    @Query('limit') limit?: string,
-    @Query('mediaType') mediaType?: string,
   ) {
     return this.eventsService.getGallery(organizer.sub, id, {
-      cursor,
-      limit: limit ? parseInt(limit, 10) : undefined,
+      cursor: cursor?.slice(0, 64),
+      limit: Math.min(Math.max(limit, 1), 100),
       mediaType,
     });
   }
@@ -127,9 +134,9 @@ export class EventsController {
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
     @Param('gid') gid: string,
-    @Body() body: { blocked: boolean },
+    @Body() dto: UpdateGuestDto,
   ) {
-    return this.eventsService.updateGuest(organizer.sub, gid, body.blocked);
+    return this.eventsService.updateGuest(organizer.sub, id, gid, dto);
   }
 
   @Delete(':id/guests/:gid')
@@ -147,11 +154,12 @@ export class EventsController {
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') id: string,
     @Param('sid') sid: string,
-    @Body() body: { status: 'PENDING_APPROVAL' | 'APPROVED' | 'HIDDEN' },
+    @Body() dto: ModerateSubmissionDto,
   ) {
-    return this.eventsService.moderateSubmission(organizer.sub, sid, body.status);
+    return this.eventsService.moderateSubmission(organizer.sub, id, sid, dto.status);
   }
 
+  @Throttle({ default: { ttl: 60000, limit: 3 } })
   @Post(':id/exports')
   createExport(@CurrentOrganizer() organizer: OrganizerPayload, @Param('id') id: string) {
     return this.eventsService.createExport(organizer.sub, id);

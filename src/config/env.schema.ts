@@ -9,7 +9,6 @@ export const envSchema = Joi.object({
   DATABASE_URL: Joi.string().required(),
   REDIS_URL: Joi.string().default('redis://localhost:6379'),
   JWT_ACCESS_SECRET: Joi.string().min(32).required(),
-  JWT_REFRESH_SECRET: Joi.string().min(32).required(),
   JWT_GUEST_SECRET: Joi.string().min(32).required(),
   WEB_URL: Joi.string().uri().required(),
   PUBLIC_WEB_URL: Joi.string().uri().required(),
@@ -17,7 +16,8 @@ export const envSchema = Joi.object({
   CF_STREAM_API_TOKEN: Joi.string().default(''),
   CF_STREAM_CUSTOMER_SUBDOMAIN: Joi.string().default(''),
   STREAM_WEBHOOK_SECRET: Joi.string().default(''),
-  STREAM_REQUIRE_SIGNED: Joi.boolean().default(false),
+  // Vídeos privados por omissão: reprodução/download só com token assinado de curta duração
+  STREAM_REQUIRE_SIGNED: Joi.boolean().default(true),
   R2_ACCOUNT_ID: Joi.string().default(''),
   R2_ACCESS_KEY_ID: Joi.string().default(''),
   R2_SECRET_ACCESS_KEY: Joi.string().default(''),

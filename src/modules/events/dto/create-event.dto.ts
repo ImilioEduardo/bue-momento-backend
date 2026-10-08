@@ -3,8 +3,12 @@ import {
   IsDateString,
   IsEnum,
   IsInt,
+  IsNotEmpty,
   IsOptional,
   IsString,
+  IsTimeZone,
+  Max,
+  MaxLength,
   Min,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
@@ -14,6 +18,8 @@ import { Type } from 'class-transformer';
 export class CreateEventDto {
   @ApiProperty()
   @IsString()
+  @IsNotEmpty()
+  @MaxLength(120)
   name: string;
 
   @ApiProperty()
@@ -25,7 +31,7 @@ export class CreateEventDto {
   endAt: string;
 
   @ApiPropertyOptional({ default: 'Africa/Luanda' })
-  @IsString()
+  @IsTimeZone()
   @IsOptional()
   timezone?: string;
 
@@ -37,6 +43,7 @@ export class CreateEventDto {
   @ApiPropertyOptional({ default: 3 })
   @IsInt()
   @Min(1)
+  @Max(50)
   @Type(() => Number)
   @IsOptional()
   challengesPerGuest?: number;

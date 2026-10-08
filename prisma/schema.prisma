@@ -71,8 +71,14 @@ model RefreshToken {
   organizerId String
   organizer   Organizer @relation(fields: [organizerId], references: [id], onDelete: Cascade)
   tokenHash   String    @unique
+  /// Sessão a que o token pertence (todos os tokens rodados de um login partilham o familyId)
+  familyId    String
+  /// Preenchido quando o token é rodado ou a sessão é terminada
+  revokedAt   DateTime?
   expiresAt   DateTime
   createdAt   DateTime  @default(now())
+
+  @@index([familyId])
 }
 
 model Plan {

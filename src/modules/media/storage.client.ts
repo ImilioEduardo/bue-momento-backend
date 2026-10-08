@@ -14,7 +14,8 @@ import type { Readable } from 'stream';
 export interface IStorageClient {
   presignPutUrl(key: string, contentType: string, sizeBytes: number, expiresInSec: number): Promise<string>;
   presignGetUrl(key: string, expiresInSec: number): Promise<string>;
-  headObject(key: string): Promise<{ exists: boolean; sizeBytes?: number }>;
+  headObject(key: string): Promise<{ exists: boolean; sizeBytes?: number; contentType?: string }>;
+  readPrefix(key: string, bytes: number): Promise<Buffer>;
   deleteObject(key: string): Promise<void>;
   streamUpload(key: string, body: Readable, contentType: string): Promise<void>;
 }
@@ -75,16 +76,26 @@ export class StorageClient implements IStorageClient {
     );
   }
 
-  async headObject(key: string): Promise<{ exists: boolean; sizeBytes?: number }> {
+  async headObject(key: string): Promise<{ exists: boolean; sizeBytes?: number; contentType?: string }> {
     if (!this.s3) return { exists: true };
     try {
       const res = await this.s3.send(new HeadObjectCommand({ Bucket: this.bucket, Key: key }));
-      return { exists: true, sizeBytes: res.ContentLength };
+      return { exists: true, sizeBytes: res.ContentLength, contentType: res.ContentType };
     } catch (err: unknown) {
       const name = (err as { name?: string })?.name ?? '';
       if (name === 'NotFound' || name === '404') return { exists: false };
       throw err;
     }
+  }
+
+  /** Lê só os primeiros `bytes` do objecto (para verificar a assinatura do ficheiro). */
+  async readPrefix(key: string, bytes: number): Promise<Buffer> {
+    if (!this.s3) return Buffer.alloc(0);
+    const res = await this.s3.send(
+      new GetObjectCommand({ Bucket: this.bucket, Key: key, Range: `bytes=0-${bytes - 1}` }),
+    );
+    const arr = await res.Body?.transformToByteArray();
+    return Buffer.from(arr ?? []);
   }
 
   async deleteObject(key: string): Promise<void> {

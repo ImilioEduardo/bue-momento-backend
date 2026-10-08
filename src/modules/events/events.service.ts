@@ -8,8 +8,9 @@ import {
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Queue } from 'bullmq';
 import { ConfigService } from '@nestjs/config';
-import { EventStatus } from '@prisma/client';
-import { randomBytes } from 'crypto';
+import { EventStatus, MediaType, ModerationStatus } from '@prisma/client';
+import { randomBytes, randomUUID } from 'crypto';
+import { RELEASED_DEVICE_PREFIX } from '../public/guest.constants.js';
 import { EXTRAS } from '../plans/extras.js';
 import * as QRCode from 'qrcode';
 import PDFDocument from 'pdfkit';
@@ -63,8 +64,16 @@ export class EventsService {
     @InjectQueue('exports') private readonly exportsQueue: Queue,
   ) {}
 
+  private assertDates(startsAt: Date, endsAt: Date) {
+    if (Number.isNaN(startsAt.getTime()) || Number.isNaN(endsAt.getTime()) || endsAt <= startsAt) {
+      throw new BadRequestException({ code: 'EVENT_DATES_INVALID', message: 'A data de fim tem de ser depois da data de início.' });
+    }
+  }
+
   async create(organizerId: string, dto: CreateEventDto) {
-    const publicCode = randomBytes(4).toString('hex');
+    this.assertDates(new Date(dto.startAt), new Date(dto.endAt));
+    // 64 bits (antes 32): o código do QR deixa de ser enumerável
+    const publicCode = randomBytes(8).toString('hex');
     const event = await this.prisma.event.create({
       data: {
         organizerId,
@@ -96,7 +105,7 @@ export class EventsService {
       where: { id },
       include: {
         plan: true,
-        challenges: { orderBy: { order: 'asc' } },
+        challenges: { where: { active: true }, orderBy: { order: 'asc' } },
         _count: { select: { guests: true } },
       },
     });
@@ -112,6 +121,11 @@ export class EventsService {
     });
     if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND', message: 'Evento não encontrado.' });
     if (event.organizerId !== organizerId) throw new ForbiddenException({ code: 'FORBIDDEN', message: 'Acesso negado.' });
+
+    this.assertDates(
+      dto.startAt ? new Date(dto.startAt) : event.startsAt,
+      dto.endAt ? new Date(dto.endAt) : event.endsAt,
+    );
 
     if (dto.planId && event.status !== EventStatus.DRAFT) {
       throw new BadRequestException({ code: 'EVENT_PLAN_LOCKED', message: 'O plano só pode ser alterado quando o evento está em rascunho.' });
@@ -300,20 +314,18 @@ export class EventsService {
   async getGallery(
     organizerId: string,
     eventId: string,
-    opts: { cursor?: string; limit?: number; mediaType?: string } = {},
+    opts: { cursor?: string; limit?: number; mediaType?: MediaType } = {},
   ) {
     const event = await this.prisma.event.findUnique({ where: { id: eventId } });
     if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
     if (event.organizerId !== organizerId) throw new ForbiddenException({ code: 'FORBIDDEN' });
 
     const limit = Math.min(opts.limit ?? 20, 100);
-    const r2PublicUrl = this.config.get<string>('R2_PUBLIC_URL') ?? '';
-
     const submissions = await this.prisma.submission.findMany({
       where: {
         status: { in: ['READY', 'PROCESSING'] },
         assignment: { guest: { eventId } },
-        ...(opts.mediaType ? { mediaType: opts.mediaType as 'VIDEO' | 'PHOTO' } : {}),
+        ...(opts.mediaType ? { mediaType: opts.mediaType } : {}),
       },
       include: {
         assignment: { include: { guest: true, challenge: true } },
@@ -326,13 +338,14 @@ export class EventsService {
     const items = await Promise.all(
       submissions.map(async (s) => {
         let mediaUrl: string | undefined;
+        let thumbnailUrl: string | undefined = s.thumbnailUrl ?? undefined;
         if (s.r2Key) {
-          // Use presigned URL if storage is configured, else fall back to public URL
-          mediaUrl = this.storage.isConfigured
-            ? await this.storage.presignGetUrl(s.r2Key, 3600)
-            : r2PublicUrl ? `${r2PublicUrl}/${s.r2Key}` : undefined;
+          // Sempre URL assinada de curta duração (sem fallback para bucket público)
+          mediaUrl = await this.storage.presignGetUrl(s.r2Key, 3600);
         } else if (s.streamUid) {
-          mediaUrl = this.stream.getPlaybackUrl(s.streamUid);
+          const urls = await this.stream.getMediaUrls(s.streamUid, s.thumbnailUrl);
+          mediaUrl = urls.playbackUrl;
+          thumbnailUrl = urls.thumbnailUrl;
         }
 
         return {
@@ -345,7 +358,7 @@ export class EventsService {
           status: s.status,
           moderationStatus: s.moderationStatus,
           mediaUrl,
-          thumbnailUrl: s.thumbnailUrl ?? undefined,
+          thumbnailUrl,
           createdAt: s.createdAt.toISOString(),
         };
       }),
@@ -385,14 +398,17 @@ export class EventsService {
 
   async moderateSubmission(
     organizerId: string,
+    eventId: string,
     submissionId: string,
-    moderationStatus: 'PENDING_APPROVAL' | 'APPROVED' | 'HIDDEN',
+    moderationStatus: ModerationStatus,
   ) {
     const submission = await this.prisma.submission.findUnique({
       where: { id: submissionId },
       include: { assignment: { include: { guest: { include: { event: true } } } } },
     });
-    if (!submission) throw new NotFoundException({ code: 'SUBMISSION_NOT_FOUND' });
+    if (!submission || submission.assignment.guest.eventId !== eventId) {
+      throw new NotFoundException({ code: 'SUBMISSION_NOT_FOUND' });
+    }
     if (submission.assignment.guest.event.organizerId !== organizerId) throw new ForbiddenException({ code: 'FORBIDDEN' });
 
     return this.prisma.submission.update({
@@ -421,19 +437,37 @@ export class EventsService {
       joinedAt: g.createdAt.toISOString(),
       submissionCount: g._count.assignments,
       blockedAt: g.blockedAt?.toISOString() ?? undefined,
+      deviceReleased: g.deviceId.startsWith(RELEASED_DEVICE_PREFIX),
     }));
   }
 
-  async updateGuest(organizerId: string, guestId: string, blocked: boolean) {
+  async updateGuest(
+    organizerId: string,
+    eventId: string,
+    guestId: string,
+    dto: { blocked?: boolean; releaseDevice?: boolean },
+  ) {
     const guest = await this.prisma.guest.findUnique({ where: { id: guestId }, include: { event: true } });
-    if (!guest) throw new NotFoundException({ code: 'GUEST_NOT_FOUND' });
+    if (!guest || guest.eventId !== eventId) throw new NotFoundException({ code: 'GUEST_NOT_FOUND' });
     if (guest.event.organizerId !== organizerId) throw new ForbiddenException({ code: 'FORBIDDEN' });
+    if (dto.blocked === undefined && !dto.releaseDevice) {
+      throw new BadRequestException({ code: 'NOTHING_TO_UPDATE' });
+    }
 
-    return this.prisma.guest.update({
+    const updated = await this.prisma.guest.update({
       where: { id: guestId },
-      data: { blockedAt: blocked ? new Date() : null },
-      select: { id: true, blockedAt: true },
+      data: {
+        ...(dto.blocked !== undefined ? { blockedAt: dto.blocked ? new Date() : null } : {}),
+        // Libertar acesso: o dispositivo antigo perde a sessão e o próximo join com este telefone fica com ela
+        ...(dto.releaseDevice ? { deviceId: `${RELEASED_DEVICE_PREFIX}${randomUUID()}` } : {}),
+      },
+      select: { id: true, blockedAt: true, deviceId: true },
     });
+    return {
+      id: updated.id,
+      blockedAt: updated.blockedAt,
+      deviceReleased: updated.deviceId.startsWith(RELEASED_DEVICE_PREFIX),
+    };
   }
 
   async deleteGuest(organizerId: string, guestId: string) {
@@ -464,8 +498,15 @@ export class EventsService {
     if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
     if (event.organizerId !== organizerId) throw new ForbiddenException({ code: 'FORBIDDEN' });
 
+    // Um único ZIP em curso por evento (antes: cada clique enfileirava outro export completo)
+    const running = await this.prisma.export.findFirst({
+      where: { eventId, status: { in: ['PENDING', 'PROCESSING'] } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (running) return { id: running.id, status: running.status, downloadUrl: undefined };
+
     const exp = await this.prisma.export.create({ data: { eventId, status: 'PENDING' } });
-    await this.exportsQueue.add('zip-export', { exportId: exp.id, eventId });
+    await this.exportsQueue.add('zip-export', { exportId: exp.id, eventId }, { jobId: exp.id, attempts: 2 });
     return { id: exp.id, status: 'PENDING', downloadUrl: undefined };
   }
 
@@ -477,12 +518,7 @@ export class EventsService {
     const exp = await this.prisma.export.findUnique({ where: { id: exportId } });
     if (!exp || exp.eventId !== eventId) throw new NotFoundException({ code: 'EXPORT_NOT_FOUND' });
 
-    const r2PublicUrl = this.config.get<string>('R2_PUBLIC_URL') ?? '';
-    const downloadUrl = exp.r2Key
-      ? this.storage.isConfigured
-        ? await this.storage.presignGetUrl(exp.r2Key, 3600)
-        : `${r2PublicUrl}/${exp.r2Key}`
-      : undefined;
+    const downloadUrl = exp.r2Key ? await this.storage.presignGetUrl(exp.r2Key, 3600) : undefined;
 
     return { id: exp.id, status: exp.status, downloadUrl };
   }

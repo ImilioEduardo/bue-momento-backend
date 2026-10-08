@@ -7,6 +7,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { Request } from 'express';
 import { OrganizerPayload } from '../../../common/decorators/current-organizer.decorator.js';
+import { ORGANIZER_VERIFY_OPTIONS } from '../../../common/security/jwt.constants.js';
 
 @Injectable()
 export class JwtGuard implements CanActivate {
@@ -18,7 +19,7 @@ export class JwtGuard implements CanActivate {
     if (!token) throw new UnauthorizedException('Token em falta');
 
     try {
-      const payload = await this.jwtService.verifyAsync<OrganizerPayload>(token);
+      const payload = await this.jwtService.verifyAsync<OrganizerPayload>(token, ORGANIZER_VERIFY_OPTIONS);
       request.organizer = payload;
     } catch {
       throw new UnauthorizedException('Token inválido ou expirado');

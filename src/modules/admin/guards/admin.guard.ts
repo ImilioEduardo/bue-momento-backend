@@ -12,6 +12,7 @@ import type { Request } from 'express';
 import { PrismaService } from '../../../prisma/prisma.service.js';
 import { safeEqual } from '../../../common/security/safe-compare.js';
 import type { OrganizerPayload } from '../../../common/decorators/current-organizer.decorator.js';
+import { ORGANIZER_VERIFY_OPTIONS } from '../../../common/security/jwt.constants.js';
 
 const REFRESH_COOKIE = 'refresh_token';
 
@@ -63,7 +64,7 @@ export class AdminGuard implements CanActivate {
     const auth = req.headers.authorization;
     if (auth?.startsWith('Bearer ')) {
       try {
-        const payload = await this.jwt.verifyAsync<OrganizerPayload>(auth.slice(7));
+        const payload = await this.jwt.verifyAsync<OrganizerPayload>(auth.slice(7), ORGANIZER_VERIFY_OPTIONS);
         return payload.sub;
       } catch {
         return null;
@@ -75,9 +76,9 @@ export class AdminGuard implements CanActivate {
       const tokenHash = createHash('sha256').update(refresh).digest('hex');
       const stored = await this.prisma.refreshToken.findUnique({
         where: { tokenHash },
-        select: { organizerId: true, expiresAt: true },
+        select: { organizerId: true, expiresAt: true, revokedAt: true },
       });
-      if (stored && stored.expiresAt > new Date()) return stored.organizerId;
+      if (stored && !stored.revokedAt && stored.expiresAt > new Date()) return stored.organizerId;
     }
     return null;
   }

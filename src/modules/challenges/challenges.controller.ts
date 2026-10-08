@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseArrayPipe,
   Patch,
   Post,
   Query,
@@ -14,7 +15,7 @@ import { JwtGuard } from '../auth/guards/jwt.guard.js';
 import { CurrentOrganizer } from '../../common/decorators/current-organizer.decorator.js';
 import type { OrganizerPayload } from '../../common/decorators/current-organizer.decorator.js';
 import { ChallengesService } from './challenges.service.js';
-import { CreateChallengeDto } from './dto/create-challenge.dto.js';
+import { BulkChallengeItemDto, CreateChallengeDto } from './dto/create-challenge.dto.js';
 import { UpdateChallengeDto } from './dto/update-challenge.dto.js';
 import { ReorderChallengesDto } from './dto/reorder-challenges.dto.js';
 import { FromTemplatesDto } from './dto/from-templates.dto.js';
@@ -26,7 +27,7 @@ export class ChallengeTemplatesController {
 
   @Get()
   listTemplates(@Query('category') category?: string) {
-    return this.challengesService.listTemplates(category);
+    return this.challengesService.listTemplates(category?.slice(0, 50));
   }
 }
 
@@ -50,7 +51,8 @@ export class ChallengesController {
   createBulk(
     @CurrentOrganizer() organizer: OrganizerPayload,
     @Param('id') eventId: string,
-    @Body() dto: CreateChallengeDto[],
+    // ParseArrayPipe valida cada item (o ValidationPipe global não valida arrays de DTOs)
+    @Body(new ParseArrayPipe({ items: BulkChallengeItemDto, whitelist: true })) dto: BulkChallengeItemDto[],
   ) {
     return this.challengesService.createBulk(organizer.sub, eventId, dto);
   }

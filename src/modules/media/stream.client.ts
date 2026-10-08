@@ -10,7 +10,7 @@ export interface IStreamClient {
   }): Promise<{ tusUploadUrl: string; streamUid: string }>;
   requestMp4Download(uid: string): Promise<void>;
   getMp4DownloadUrl(uid: string): Promise<string>;
-  getPlaybackUrl(uid: string): string;
+  getMediaUrls(uid: string, storedThumbnail?: string | null): Promise<{ playbackUrl: string; thumbnailUrl?: string }>;
   deleteVideo(uid: string): Promise<void>;
 }
 
@@ -34,6 +34,33 @@ export class StreamClient implements IStreamClient {
     return this.config.get<string>('CF_STREAM_API_TOKEN')!;
   }
 
+  /** Vídeos privados: só acessíveis com token assinado (por omissão true). */
+  private get requireSigned(): boolean {
+    const v = this.config.get<boolean | string>('STREAM_REQUIRE_SIGNED');
+    return v === undefined ? true : v === true || v === 'true';
+  }
+
+  private get customerHost() {
+    const subdomain = this.config.get<string>('CF_STREAM_CUSTOMER_SUBDOMAIN') ?? '';
+    return subdomain ? `https://customer-${subdomain}.cloudflarestream.com` : '';
+  }
+
+  /** Token de acesso de curta duração para um vídeo com requireSignedURLs. */
+  private async signedToken(uid: string, ttlSec = 3600): Promise<string> {
+    const res = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}/token`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exp: Math.floor(Date.now() / 1000) + ttlSec }),
+      },
+    );
+    if (!res.ok) throw new Error(`Stream token API error ${res.status}`);
+    const data = (await res.json()) as { result?: { token?: string } };
+    if (!data.result?.token) throw new Error('Stream token API returned no token');
+    return data.result.token;
+  }
+
   async createTusUpload(params: {
     submissionId: string;
     uploadLength: number;
@@ -47,7 +74,7 @@ export class StreamClient implements IStreamClient {
       `maxdurationseconds ${b64(String(params.maxDurationSec))}`,
       `expiry ${b64(params.expiryISO)}`,
       `name ${b64(params.submissionId)}`,
-      `requiresignedurls`,
+      ...(this.requireSigned ? ['requiresignedurls'] : []),
     ].join(',');
 
     const res = await fetch(
@@ -103,13 +130,22 @@ export class StreamClient implements IStreamClient {
     };
     const url = data.result?.default?.url;
     if (!url) throw new Error(`MP4 for ${uid} not ready yet`);
-    return url;
+    // Com requireSignedURLs o uid no caminho tem de ser substituído por um token assinado
+    return this.requireSigned ? url.replace(`/${uid}/`, `/${await this.signedToken(uid, 3600)}/`) : url;
   }
 
-  getPlaybackUrl(uid: string): string {
-    const subdomain = this.config.get<string>('CF_STREAM_CUSTOMER_SUBDOMAIN') ?? '';
-    if (!subdomain) return `dev://watch/${uid}`;
-    return `https://customer-${subdomain}.cloudflarestream.com/${uid}/iframe`;
+  /** URL de reprodução (iframe) e miniatura; assinadas quando os vídeos são privados. */
+  async getMediaUrls(uid: string, storedThumbnail?: string | null): Promise<{ playbackUrl: string; thumbnailUrl?: string }> {
+    const host = this.customerHost;
+    if (!host || !this.isConfigured) return { playbackUrl: `dev://watch/${uid}`, thumbnailUrl: storedThumbnail ?? undefined };
+    if (!this.requireSigned) {
+      return { playbackUrl: `${host}/${uid}/iframe`, thumbnailUrl: storedThumbnail ?? undefined };
+    }
+    const token = await this.signedToken(uid, 3600);
+    return {
+      playbackUrl: `${host}/${token}/iframe`,
+      thumbnailUrl: `${host}/${token}/thumbnails/thumbnail.jpg`,
+    };
   }
 
   async deleteVideo(uid: string): Promise<void> {

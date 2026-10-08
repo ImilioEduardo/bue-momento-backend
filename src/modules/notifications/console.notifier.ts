@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Notifier } from './notifier.interface.js';
+import { isDevEnv } from '../../config/runtime.js';
 
-const isProduction = () => process.env['NODE_ENV'] === 'production';
+const isProduction = () => !isDevEnv();
 
 /** "+244912345678" → "+244•••••678"; "ana@x.com" → "a•••@x.com" */
 export function maskRecipient(to: string): string {

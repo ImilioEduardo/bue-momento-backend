@@ -69,12 +69,16 @@ export class PaymentsService {
       expiresAt = new Date(base.getTime() + deltaRetentionDays * 86_400_000);
     }
 
-    await this.prisma.$transaction([
-      this.prisma.payment.update({
-        where: { id: paymentId },
+    // Transacção com "trinco" no estado: só um processo consegue passar PENDING → PAID.
+    // Antes: ler status → actualizar; dois webhooks simultâneos (ou webhook + admin) somavam os extras duas vezes.
+    const applied = await this.prisma.$transaction(async (tx) => {
+      const { count } = await tx.payment.updateMany({
+        where: { id: paymentId, status: 'PENDING' },
         data: { status: 'PAID', paidAt: now },
-      }),
-      this.prisma.event.update({
+      });
+      if (count === 0) return false;
+
+      await tx.event.update({
         where: { id: event.id },
         data: {
           ...(isNewPlan ? { status: EventStatus.ACTIVE } : {}),
@@ -84,8 +88,16 @@ export class PaymentsService {
           ...(deltaRetentionDays > 0 ? { extraRetentionDays: { increment: deltaRetentionDays } } : {}),
           ...(extendedMaxSeconds != null ? { extendedMaxSeconds } : {}),
         },
-      }),
-    ]);
+      });
+      return true;
+    });
+
+    if (!applied) {
+      // Outro processo aplicou (ou expirou) entretanto
+      const current = await this.prisma.payment.findUnique({ where: { id: paymentId }, select: { status: true } });
+      if (current?.status === 'PAID') return { eventId: payment.eventId };
+      throw new BadRequestException({ code: 'PAYMENT_NOT_PENDING', message: 'Este pagamento não pode ser confirmado.' });
+    }
 
     // Notify organizer (fire-and-forget — don't block the response)
     if (isNewPlan && event.organizer) {

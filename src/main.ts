@@ -1,3 +1,4 @@
+import './config/node-env.js';
 import './instrument.js';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -8,6 +9,8 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module.js';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter.js';
+import { isDevEnv } from './config/runtime.js';
+import { corsOptions } from './config/cors.js';
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true, rawBody: true });
@@ -19,15 +22,13 @@ async function bootstrap() {
   app.useLogger(app.get(Logger));
   app.use(helmet());
   app.use(cookieParser());
-  app.enableCors({
-    origin: process.env['WEB_URL'],
-    credentials: true,
-  });
+  app.enableCors(corsOptions(process.env['WEB_URL'], isDevEnv()));
   app.setGlobalPrefix('api/v1');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  if (process.env['NODE_ENV'] !== 'production') {
+  // Swagger só em desenvolvimento/testes
+  if (isDevEnv()) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Bué Momentos API')
       .setDescription('API para gestão de desafios em vídeo para eventos')

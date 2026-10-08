@@ -1,19 +1,15 @@
-import { IsEmail, IsOptional, IsString } from 'class-validator';
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { IsNotEmpty, IsString, MaxLength } from 'class-validator';
+import { ApiProperty } from '@nestjs/swagger';
 
+/**
+ * Só o nome pode ser alterado directamente.
+ * Email/telefone: POST /me/contact/request + POST /me/contact/verify (OTP no novo contacto).
+ * Campos extra (email, phone…) são descartados pelo ValidationPipe (whitelist).
+ */
 export class UpdateOrganizerDto {
-  @ApiPropertyOptional()
+  @ApiProperty()
   @IsString()
-  @IsOptional()
-  name?: string;
-
-  @ApiPropertyOptional()
-  @IsEmail()
-  @IsOptional()
-  email?: string;
-
-  @ApiPropertyOptional()
-  @IsString()
-  @IsOptional()
-  phone?: string;
+  @IsNotEmpty()
+  @MaxLength(120)
+  name: string;
 }

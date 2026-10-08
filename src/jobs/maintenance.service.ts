@@ -127,6 +127,28 @@ export class MaintenanceService {
     });
   }
 
+  // Limpeza de sessões e códigos antigos (diariamente às 04:00 UTC)
+  @Cron('0 4 * * *')
+  async purgeAuthData(): Promise<void> {
+    await this.safely('purgeAuthData', async () => {
+      const now = Date.now();
+      const [tokens, otps] = await Promise.all([
+        this.prisma.refreshToken.deleteMany({
+          where: {
+            OR: [
+              { expiresAt: { lt: new Date(now) } },
+              { revokedAt: { lt: new Date(now - 7 * 86_400_000) } },
+            ],
+          },
+        }),
+        this.prisma.otpCode.deleteMany({ where: { createdAt: { lt: new Date(now - 2 * 86_400_000) } } }),
+      ]);
+      if (tokens.count + otps.count > 0) {
+        this.logger.log(`purgeAuthData: ${tokens.count} refresh tokens, ${otps.count} OTPs removidos`);
+      }
+    });
+  }
+
   private async safely(job: string, fn: () => Promise<void>): Promise<void> {
     try {
       await fn();

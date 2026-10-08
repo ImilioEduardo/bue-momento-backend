@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
@@ -17,6 +18,14 @@ import { StorageClient } from '../media/storage.client.js';
 import { NOTIFIER } from '../notifications/notifier.interface.js';
 import type { Notifier } from '../notifications/notifier.interface.js';
 import { JoinEventDto } from './dto/join-event.dto.js';
+import { normalizeContact } from '../auth/contact.util.js';
+import { RELEASED_DEVICE_PREFIX } from './guest.constants.js';
+import { isDevEnv } from '../../config/runtime.js';
+import { detectImageType } from '../media/file-signature.js';
+import { GUEST_SIGN_OPTIONS } from '../../common/security/jwt.constants.js';
+
+const GUEST_TOKEN_MAX_SEC = 90 * 24 * 60 * 60;
+const GUEST_TOKEN_MIN_SEC = 60 * 60;
 import { UploadSubmissionDto } from './dto/upload-submission.dto.js';
 
 const ALLOWED_PHOTO_TYPES: Record<string, string> = {
@@ -118,21 +127,36 @@ export class PublicService {
     if (!event) throw new NotFoundException({ code: 'EVENT_NOT_FOUND' });
     if (event.status !== 'ACTIVE') throw new BadRequestException({ code: 'EVENT_NOT_ACTIVE' });
 
+    const phone = normalizeContact(dto.phone);
+    if (dto.deviceId.startsWith(RELEASED_DEVICE_PREFIX)) {
+      throw new BadRequestException({ code: 'DEVICE_ID_INVALID' });
+    }
+
     // Re-login: same device already registered for this event
     let guest = await this.prisma.guest.findFirst({
       where: { eventId: event.id, deviceId: dto.deviceId },
     });
 
-    if (guest?.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED' });
+    if (guest?.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED', message: 'O teu acesso a este evento foi bloqueado.' });
 
     if (!guest) {
-      // Phone already used → treat as re-login on a different device
       const byPhone = await this.prisma.guest.findFirst({
-        where: { eventId: event.id, phone: dto.phone },
+        where: { eventId: event.id, phone },
       });
       if (byPhone) {
-        if (byPhone.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED' });
-        guest = byPhone;
+        if (byPhone.blockedAt != null) throw new ForbiddenException({ code: 'GUEST_BLOCKED', message: 'O teu acesso a este evento foi bloqueado.' });
+        // Saber o telefone NÃO chega para entrar como outro convidado (antes: devolvia o token dele).
+        // Só se o organizador tiver libertado o acesso é que o número pode ser associado a um novo dispositivo.
+        if (!byPhone.deviceId.startsWith(RELEASED_DEVICE_PREFIX)) {
+          throw new ConflictException({
+            code: 'GUEST_PHONE_IN_USE',
+            message: 'Este número já entrou neste evento noutro dispositivo. Pede ao organizador para libertar o teu acesso.',
+          });
+        }
+        guest = await this.prisma.guest.update({
+          where: { id: byPhone.id },
+          data: { deviceId: dto.deviceId },
+        });
       } else {
         // New guest — enforce limits
         const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
@@ -142,7 +166,7 @@ export class PublicService {
           data: {
             eventId: event.id,
             name: dto.name,
-            phone: dto.phone,
+            phone,
             deviceId: dto.deviceId,
             consentAt: new Date(),
           },
@@ -158,11 +182,19 @@ export class PublicService {
       }
     }
 
+    // O token do convidado só vale até ao fim da janela de envio do evento (antes: sempre 90 dias)
+    const windowEndMs = event.endsAt.getTime() + event.graceHours * 3_600_000;
+    const ttlSec = Math.min(
+      GUEST_TOKEN_MAX_SEC,
+      Math.max(GUEST_TOKEN_MIN_SEC, Math.ceil((windowEndMs - Date.now()) / 1000)),
+    );
     const guestToken = await this.jwt.signAsync(
-      { sub: guest.id, eventId: event.id, type: 'guest' },
+      // did = dispositivo a que este token pertence; se o acesso for libertado, o token antigo deixa de valer
+      { sub: guest.id, eventId: event.id, did: guest.deviceId, type: 'guest' },
       {
+        ...GUEST_SIGN_OPTIONS,
         secret: this.config.get<string>('JWT_GUEST_SECRET'),
-        expiresIn: '90d',
+        expiresIn: ttlSec,
       },
     );
 
@@ -258,7 +290,8 @@ export class PublicService {
       event?.extendedMaxSeconds ?? event?.plan?.maxVideoSeconds ?? 30;
 
     const assignments = await this.prisma.assignment.findMany({
-      where: { guestId },
+      // Desafios removidos pelo organizador só continuam visíveis para quem já enviou algo
+      where: { guestId, OR: [{ challenge: { active: true } }, { submissions: { some: {} } }] },
       include: {
         challenge: true,
         submissions: { orderBy: { createdAt: 'desc' } },
@@ -309,6 +342,7 @@ export class PublicService {
     const assignment = await this.prisma.assignment.findFirst({
       where: { id: aid, guestId },
       include: {
+        challenge: { select: { active: true } },
         submissions: {
           where: { status: { in: [...ACTIVE_STATUSES] } },
           orderBy: { createdAt: 'desc' },
@@ -317,6 +351,9 @@ export class PublicService {
       },
     });
     if (!assignment) throw new NotFoundException({ code: 'ASSIGNMENT_NOT_FOUND' });
+    if (!assignment.challenge.active) {
+      throw new ConflictException({ code: 'CHALLENGE_INACTIVE', message: 'Este desafio foi removido pelo organizador.' });
+    }
 
     const event = await this.prisma.event.findUnique({
       where: { id: eventId },
@@ -356,6 +393,13 @@ export class PublicService {
       if (existingActive.r2Key) await this.storage.deleteObject(existingActive.r2Key);
       await this.prisma.submission.delete({ where: { id: existingActive.id } });
       await this.prisma.assignment.update({ where: { id: aid }, data: { status: 'PENDING' } });
+    }
+
+    // Falhar fechado: em produção sem storage configurado não se aceitam envios
+    // (antes: URLs de stub em localhost e fotos marcadas READY sem verificação)
+    const storageReady = dto.mediaType === MediaType.VIDEO ? this.stream.isConfigured : this.storage.isConfigured;
+    if (!storageReady && !isDevEnv()) {
+      throw new ServiceUnavailableException({ code: 'STORAGE_NOT_CONFIGURED', message: 'Envios temporariamente indisponíveis.' });
     }
 
     if (dto.mediaType === MediaType.VIDEO) {
@@ -447,20 +491,44 @@ export class PublicService {
   async completePhotoSubmission(guestId: string, sid: string) {
     const sub = await this.prisma.submission.findFirst({
       where: { id: sid, assignment: { guestId } },
+      include: { assignment: { include: { guest: { include: { event: { select: { moderation: true } } } } } } },
     });
     if (!sub) throw new NotFoundException({ code: 'SUBMISSION_NOT_FOUND' });
-    if (sub.mediaType !== 'PHOTO') {
+    if (sub.mediaType !== 'PHOTO' || !sub.r2Key) {
       throw new BadRequestException({ code: 'NOT_A_PHOTO' });
     }
+    // Só uma vez e só a partir de UPLOADING (antes: podia "completar" de novo uma submissão já processada)
+    if (sub.status !== 'UPLOADING') {
+      throw new ConflictException({ code: 'SUBMISSION_NOT_UPLOADING' });
+    }
 
-    if (sub.r2Key && this.storage.isConfigured) {
-      const { exists } = await this.storage.headObject(sub.r2Key);
-      if (!exists) throw new BadRequestException({ code: 'PHOTO_NOT_UPLOADED', message: 'Foto ainda não chegou ao servidor.' });
+    if (this.storage.isConfigured) {
+      const head = await this.storage.headObject(sub.r2Key);
+      if (!head.exists) throw new BadRequestException({ code: 'PHOTO_NOT_UPLOADED', message: 'Foto ainda não chegou ao servidor.' });
+
+      // O ficheiro tem de ser mesmo uma imagem do tipo pedido (magic bytes) e do tamanho declarado
+      const ext = sub.r2Key.slice(sub.r2Key.lastIndexOf('.'));
+      const expectedType = Object.entries(ALLOWED_PHOTO_TYPES).find(([, e]) => e === ext)?.[0];
+      const detected = detectImageType(await this.storage.readPrefix(sub.r2Key, 16));
+      const sizeOk = sub.sizeBytes == null || (head.sizeBytes != null && BigInt(head.sizeBytes) === sub.sizeBytes);
+      if (!expectedType || detected !== expectedType || !sizeOk) {
+        this.logger.warn(`Submission ${sid}: ficheiro rejeitado (esperado ${expectedType}, detectado ${detected ?? 'desconhecido'}, sizeOk=${sizeOk})`);
+        await this.storage.deleteObject(sub.r2Key);
+        await this.prisma.submission.update({ where: { id: sid }, data: { status: 'FAILED' } });
+        throw new BadRequestException({ code: 'INVALID_FILE_CONTENT', message: 'O ficheiro enviado não é uma imagem válida.' });
+      }
+    } else if (!isDevEnv()) {
+      throw new ServiceUnavailableException({ code: 'STORAGE_NOT_CONFIGURED' });
     }
 
     await this.prisma.submission.update({
       where: { id: sid },
-      data: { status: 'READY', readyAt: new Date() },
+      data: {
+        status: 'READY',
+        readyAt: new Date(),
+        // Antes as fotos ficavam sempre PENDING_APPROVAL (mesmo sem moderação) e nunca entravam no ZIP
+        moderationStatus: sub.assignment.guest.event.moderation ? 'PENDING_APPROVAL' : 'APPROVED',
+      },
     });
     await this.markAssignmentDone(sub.assignmentId);
   }
