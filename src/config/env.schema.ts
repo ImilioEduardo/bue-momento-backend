@@ -26,17 +26,15 @@ export const envSchema = Joi.object({
   PAYMENT_PROVIDER: Joi.string().valid('proxypay', 'manual').default('manual'),
   PROXYPAY_API_KEY: Joi.string().default(''),
   PROXYPAY_WEBHOOK_SECRET: Joi.string().default(''),
-  SMS_PROVIDER: Joi.string().valid('console', 'twilio').default('console'),
+  // console (dev: OTP no terminal) | evolution (WhatsApp via Evolution API self-hosted)
+  SMS_PROVIDER: Joi.string().valid('console', 'evolution').default('console'),
   SMS_API_KEY: Joi.string().default(''),
-  // Twilio (SMS). Autenticação: API Key SID+Secret (recomendado) ou Auth Token.
-  TWILIO_ACCOUNT_SID: Joi.string().allow('').default(''),
-  TWILIO_AUTH_TOKEN: Joi.string().allow('').default(''),
-  TWILIO_API_KEY_SID: Joi.string().allow('').default(''),
-  TWILIO_API_KEY_SECRET: Joi.string().allow('').default(''),
-  // Remetente: Messaging Service (recomendado) ou número/ID alfanumérico (ex. +17372508034 ou BueMoments)
-  TWILIO_MESSAGING_SERVICE_SID: Joi.string().allow('').default(''),
-  TWILIO_SMS_FROM: Joi.string().allow('').default(''),
-  TWILIO_DEFAULT_COUNTRY_CODE: Joi.string().pattern(/^\d{1,3}$/).default('244'),
+  // Evolution API (WhatsApp). EVOLUTION_API_KEY = token da instância, NÃO a chave global.
+  EVOLUTION_API_URL: Joi.string().allow('').default(''),
+  EVOLUTION_API_KEY: Joi.string().allow('').default(''),
+  EVOLUTION_INSTANCE: Joi.string().allow('').default('bue-momentos'),
+  // Indicativo usado quando o telefone guardado não o tem (944916156 → 244944916156)
+  PHONE_DEFAULT_COUNTRY_CODE: Joi.string().pattern(/^\d{1,3}$/).default('244'),
   EMAIL_PROVIDER: Joi.string().valid('console').default('console'),
   EMAIL_API_KEY: Joi.string().default(''),
   SENTRY_DSN: Joi.string().default(''),
@@ -53,12 +51,23 @@ export const envSchema = Joi.object({
     if (str(key).length < min) problems.push(`${key} (mínimo ${min} caracteres)`);
   };
 
-  // Twilio: se foi escolhido, tem de estar completo (em qualquer ambiente)
-  if (env['SMS_PROVIDER'] === 'twilio') {
-    if (!/^AC[0-9a-f]{32}$/i.test(str('TWILIO_ACCOUNT_SID'))) problems.push('TWILIO_ACCOUNT_SID (formato AC + 32 hex)');
-    const hasApiKey = !!str('TWILIO_API_KEY_SID') && !!str('TWILIO_API_KEY_SECRET');
-    if (!hasApiKey && !str('TWILIO_AUTH_TOKEN')) problems.push('TWILIO_AUTH_TOKEN ou TWILIO_API_KEY_SID + TWILIO_API_KEY_SECRET');
-    if (!str('TWILIO_MESSAGING_SERVICE_SID') && !str('TWILIO_SMS_FROM')) problems.push('TWILIO_MESSAGING_SERVICE_SID ou TWILIO_SMS_FROM');
+  // Evolution: se foi escolhida, tem de estar completa (em qualquer ambiente)
+  if (env['SMS_PROVIDER'] === 'evolution') {
+    let url: URL | null = null;
+    try {
+      url = new URL(str('EVOLUTION_API_URL'));
+    } catch {
+      problems.push('EVOLUTION_API_URL (URL válido, ex. http://localhost:8080)');
+    }
+    if (url && env['NODE_ENV'] === 'production') {
+      // A API key viaja em cada pedido: em produção só HTTPS ou rede privada (ex. *.railway.internal)
+      const privateHost = url.hostname.endsWith('.internal') || url.hostname === 'localhost';
+      if (url.protocol !== 'https:' && !privateHost) {
+        problems.push('EVOLUTION_API_URL tem de ser https:// em produção (ou um host privado *.internal)');
+      }
+    }
+    if (str('EVOLUTION_API_KEY').length < 16) problems.push('EVOLUTION_API_KEY (token da instância, mínimo 16 caracteres)');
+    if (!/^[\w-]{1,64}$/.test(str('EVOLUTION_INSTANCE'))) problems.push('EVOLUTION_INSTANCE (letras, números, - e _)');
   }
 
   if (env['NODE_ENV'] !== 'production') {
@@ -68,7 +77,7 @@ export const envSchema = Joi.object({
   }
 
   // Sem fornecedor real de SMS ninguém consegue fazer login em produção
-  if (env['SMS_PROVIDER'] === 'console') problems.push('SMS_PROVIDER tem de ser "twilio" em produção');
+  if (env['SMS_PROVIDER'] === 'console') problems.push('SMS_PROVIDER tem de ser "evolution" em produção');
 
   need('ADMIN_SECRET', 32);
   need('ADMIN_PASSWORD', 12);

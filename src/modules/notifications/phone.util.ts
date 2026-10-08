@@ -1,6 +1,6 @@
 /**
  * Converte um telefone guardado (ex.: "944916156", "244944916156", "+244 944 916 156")
- * para o formato E.164 exigido pelo Twilio ("+244944916156").
+ * para o formato E.164 ("+244944916156"). A Evolution usa-o sem o "+".
  * Números com 9 dígitos começados por 9 são tratados como móveis do país por omissão.
  */
 export function toE164(raw: string, defaultCountryCode = '244'): string {
@@ -16,5 +16,5 @@ export function toE164(raw: string, defaultCountryCode = '244'): string {
 
 /** Esconde números de telefone em textos de erro antes de os registar. */
 export function maskPhonesInText(text: string): string {
-  return text.replace(/\+?\d[\d\s-]{6,}\d/g, '•••');
+  return text.replace(/\+?\d[\d\s-]{6,}\d/g, '***');
 }

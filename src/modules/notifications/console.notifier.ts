@@ -4,13 +4,13 @@ import { isDevEnv } from '../../config/runtime.js';
 
 const isProduction = () => !isDevEnv();
 
-/** "+244912345678" → "+244•••••678"; "ana@x.com" → "a•••@x.com" */
+/** "+244912345678" → "+244*****678"; "ana@x.com" → "a***@x.com" (ASCII: legível em qualquer terminal) */
 export function maskRecipient(to: string): string {
   if (to.includes('@')) {
     const [user, domain] = to.split('@');
-    return `${user.slice(0, 1)}•••@${domain}`;
+    return `${user.slice(0, 1)}***@${domain}`;
   }
-  return to.length > 7 ? `${to.slice(0, 4)}•••••${to.slice(-3)}` : '•••';
+  return to.length > 7 ? `${to.slice(0, 4)}*****${to.slice(-3)}` : '***';
 }
 
 /**
