@@ -81,13 +81,14 @@ export class PublicService {
     const now = new Date();
     let status: 'NOT_STARTED' | 'ACTIVE' | 'ENDED' | 'FULL';
 
+    const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
+
     if (event.status === 'ACTIVE') {
       if (now < event.startsAt) {
         status = 'NOT_STARTED';
       } else if (now > new Date(event.endsAt.getTime() + event.graceHours * 3_600_000)) {
         status = 'ENDED';
       } else {
-        const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
         const maxGuests = (event.plan?.maxGuests ?? 0) + event.extraGuests;
         status = guestCount >= maxGuests ? 'FULL' : 'ACTIVE';
       }
@@ -96,8 +97,6 @@ export class PublicService {
     } else {
       status = 'ENDED';
     }
-
-    const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
 
     return {
       id: event.id,
@@ -158,25 +157,31 @@ export class PublicService {
           data: { deviceId: dto.deviceId },
         });
       } else {
-        // New guest — enforce limits
-        const guestCount = await this.prisma.guest.count({ where: { eventId: event.id } });
-        this.limitsService.assertGuestCanJoin(event, guestCount);
-
-        guest = await this.prisma.guest.create({
-          data: {
-            eventId: event.id,
-            name: dto.name,
-            phone,
-            deviceId: dto.deviceId,
-            consentAt: new Date(),
-          },
+        // New guest — enforce limits atomically.
+        // SELECT FOR UPDATE on the event row serializes concurrent joins so that
+        // count + create is never interleaved with another join for the same event.
+        const { newGuest, countBefore } = await this.prisma.$transaction(async (tx) => {
+          await tx.$executeRaw`SELECT id FROM "Event" WHERE id = ${event.id} FOR UPDATE`;
+          const currentCount = await tx.guest.count({ where: { eventId: event.id } });
+          this.limitsService.assertGuestCanJoin(event, currentCount);
+          const created = await tx.guest.create({
+            data: {
+              eventId: event.id,
+              name: dto.name,
+              phone,
+              deviceId: dto.deviceId,
+              consentAt: new Date(),
+            },
+          });
+          return { newGuest: created, countBefore: currentCount };
         });
+        guest = newGuest;
 
         await this.assignChallenges(guest.id, event.id, event.challengesPerGuest, event.distribution);
 
         // Notify organizer when the last available slot is taken
         const maxGuests = (event.plan?.maxGuests ?? 0) + event.extraGuests;
-        if (guestCount + 1 >= maxGuests) {
+        if (countBefore + 1 >= maxGuests) {
           this.notifyGuestLimitReached(event.id, maxGuests).catch(() => {});
         }
       }

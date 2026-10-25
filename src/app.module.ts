@@ -17,6 +17,7 @@ import { PublicModule } from './modules/public/public.module.js';
 import { AdminModule } from './modules/admin/admin.module.js';
 import { WebhooksModule } from './modules/webhooks/webhooks.module.js';
 import { JobsModule } from './jobs/jobs.module.js';
+import { RedisModule } from './redis/redis.module.js';
 import { AppThrottlerGuard } from './common/guards/app-throttler.guard.js';
 
 @Module({
@@ -56,6 +57,7 @@ import { AppThrottlerGuard } from './common/guards/app-throttler.guard.js';
       }),
     }),
     PrismaModule,
+    RedisModule,
     NotificationsModule,
     HealthModule,
     AuthModule,

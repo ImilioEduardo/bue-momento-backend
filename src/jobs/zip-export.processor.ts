@@ -89,32 +89,57 @@ export class ZipExportProcessor extends WorkerHost {
       if (err.code !== 'ENOENT') this.logger.warn(`Archiver warning: ${err.message}`);
     });
 
+    const slug = (s: string) =>
+      s.slice(0, 30).replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
+
     let processed = 0;
     for (const sub of submissions) {
-      const slug = (s: string) =>
-        s.slice(0, 30).replace(/[^\w\s-]/g, '').trim().replace(/\s+/g, '_');
       const ext = sub.mediaType === 'VIDEO' ? 'mp4' : this.photoExt(sub.r2Key ?? '');
       const filename = `${String(processed + 1).padStart(3, '0')}_${slug(sub.assignment.guest.name)}_${slug(sub.assignment.challenge.text)}.${ext}`;
 
+      let url: string;
       try {
-        const url = sub.r2Key
+        url = sub.r2Key
           ? await this.storage.presignGetUrl(sub.r2Key, 3600)
           : await this.stream.getMp4DownloadUrl(sub.streamUid!);
-
-        const response = await fetch(url);
-        if (!response.ok || !response.body) {
-          this.logger.warn(`Skipping submission ${sub.id}: HTTP ${response.status}`);
-          continue;
-        }
-
-        // Convert Web ReadableStream to Node.js Readable (Node 18+ API)
-        const readable = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
-        archive.append(readable, { name: filename });
-        processed++;
       } catch (err) {
         this.logger.warn(`Skipping submission ${sub.id}: ${(err as Error).message}`);
+        continue;
       }
 
+      let response: Response;
+      try {
+        response = await fetch(url);
+      } catch (err) {
+        this.logger.warn(`Skipping submission ${sub.id}: fetch failed — ${(err as Error).message}`);
+        continue;
+      }
+      if (!response.ok || !response.body) {
+        this.logger.warn(`Skipping submission ${sub.id}: HTTP ${response.status}`);
+        continue;
+      }
+
+      // Register the entry listener BEFORE appending to avoid a race condition.
+      // Awaiting this promise ensures the archiver fully writes each file before
+      // the next fetch, keeping memory usage bounded to ~1 file at a time.
+      const entryWritten = new Promise<void>((resolve, reject) => {
+        const onEntry = () => { archive.removeListener('error', onError); resolve(); };
+        const onError = (err: Error) => { archive.removeListener('entry', onEntry); reject(err); };
+        archive.once('entry', onEntry);
+        archive.once('error', onError);
+      });
+
+      const readable = Readable.fromWeb(response.body as Parameters<typeof Readable.fromWeb>[0]);
+      archive.append(readable, { name: filename });
+
+      try {
+        await entryWritten;
+      } catch (err) {
+        this.logger.warn(`Skipping submission ${sub.id}: archive error — ${(err as Error).message}`);
+        continue;
+      }
+
+      processed++;
       await job.updateProgress(Math.round((processed / submissions.length) * 90));
     }
 

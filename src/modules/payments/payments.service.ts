@@ -47,14 +47,14 @@ export class PaymentsService {
     for (const code of extraIds) {
       const extra = EXTRAS.find((e) => e.code === code);
       if (!extra) continue;
-      const match = extra.effect.match(/(\w+)\s*([+]?=)\s*(\d+)/);
-      if (!match) continue;
-      const [, field, op, valStr] = match;
-      const val = parseInt(valStr, 10);
-      if (field === 'extraGuests' && op === '+=') deltaGuests += val;
-      else if (field === 'extraVideosPerGuest' && op === '+=') deltaVideosPerGuest += val;
-      else if (field === 'extraRetentionDays' && op === '+=') deltaRetentionDays += val;
-      else if (field === 'extendedMaxSeconds' && op === '=') extendedMaxSeconds = val;
+      const { field, op, value } = extra.effect;
+      if (op === 'increment') {
+        if (field === 'extraGuests') deltaGuests += value;
+        else if (field === 'extraVideosPerGuest') deltaVideosPerGuest += value;
+        else if (field === 'extraRetentionDays') deltaRetentionDays += value;
+      } else if (op === 'set' && field === 'extendedMaxSeconds') {
+        extendedMaxSeconds = value;
+      }
     }
 
     const now = new Date();

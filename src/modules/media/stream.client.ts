@@ -17,6 +17,7 @@ export interface IStreamClient {
 @Injectable()
 export class StreamClient implements IStreamClient {
   private readonly logger = new Logger(StreamClient.name);
+  private readonly tokenCache = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(private readonly config: ConfigService) {}
 
@@ -45,19 +46,30 @@ export class StreamClient implements IStreamClient {
     return subdomain ? `https://customer-${subdomain}.cloudflarestream.com` : '';
   }
 
-  /** Token de acesso de curta duração para um vídeo com requireSignedURLs. */
+  /** Token de acesso de curta duração para um vídeo com requireSignedURLs.
+   *  Reutiliza o token em cache enquanto tiver mais de 5 min de validade, evitando
+   *  N chamadas à API por galeria (uma por vídeo privado).
+   */
   private async signedToken(uid: string, ttlSec = 3600): Promise<string> {
+    const now = Date.now();
+    const cached = this.tokenCache.get(uid);
+    if (cached && cached.expiresAt - now > 5 * 60 * 1000) {
+      return cached.token;
+    }
+
     const res = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}/token`,
       {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ exp: Math.floor(Date.now() / 1000) + ttlSec }),
+        body: JSON.stringify({ exp: Math.floor(now / 1000) + ttlSec }),
       },
     );
     if (!res.ok) throw new Error(`Stream token API error ${res.status}`);
     const data = (await res.json()) as { result?: { token?: string } };
     if (!data.result?.token) throw new Error('Stream token API returned no token');
+
+    this.tokenCache.set(uid, { token: data.result.token, expiresAt: now + ttlSec * 1000 });
     return data.result.token;
   }
 
@@ -149,12 +161,17 @@ export class StreamClient implements IStreamClient {
   }
 
   async deleteVideo(uid: string): Promise<void> {
-    await fetch(
+    if (!this.isConfigured) return;
+    const res = await fetch(
       `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}`,
       {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${this.apiToken}` },
       },
     );
+    // 404 means already deleted — treat as success
+    if (!res.ok && res.status !== 404) {
+      this.logger.warn(`deleteVideo ${uid} failed: HTTP ${res.status}`);
+    }
   }
 }

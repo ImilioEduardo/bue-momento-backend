@@ -21,35 +21,28 @@ import { StorageClient } from '../media/storage.client.js';
 import { StreamClient } from '../media/stream.client.js';
 import { CreateEventDto } from './dto/create-event.dto.js';
 import { UpdateEventDto } from './dto/update-event.dto.js';
+import type { MappableEvent } from './events.types.js';
 
-function mapEvent(event: Record<string, unknown> & {
-  startsAt: Date;
-  endsAt: Date;
-  publicCode: string;
-  moderation: boolean;
-  extraGuests: number;
-  plan?: { maxGuests: number; maxVideosPerGuest: number; retentionDays: number } | null;
-  _count?: { guests?: number };
-}) {
+function mapEvent(event: MappableEvent) {
   return {
-    id: event['id'],
+    id: event.id,
     code: event.publicCode,
-    name: event['name'],
+    name: event.name,
     startAt: event.startsAt.toISOString(),
     endAt: event.endsAt.toISOString(),
-    timezone: event['timezone'],
-    coverUrl: event['coverUrl'] ?? undefined,
-    status: event['status'],
-    distribution: event['distribution'],
-    challengesPerGuest: event['challengesPerGuest'],
+    timezone: event.timezone,
+    coverUrl: event.coverUrl ?? undefined,
+    status: event.status,
+    distribution: event.distribution,
+    challengesPerGuest: event.challengesPerGuest,
     moderationEnabled: event.moderation,
-    planId: event['planId'] ?? undefined,
+    planId: event.planId ?? undefined,
     extraGuests: event.extraGuests,
-    extraVideosPerGuest: event['extraVideosPerGuest'],
+    extraVideosPerGuest: event.extraVideosPerGuest,
     guestCount: event._count?.guests ?? 0,
     submissionCount: 0,
     maxGuests: event.plan ? event.plan.maxGuests + event.extraGuests : 0,
-    createdAt: event['createdAt'],
+    createdAt: event.createdAt,
   };
 }
 

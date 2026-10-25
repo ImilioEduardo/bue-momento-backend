@@ -10,12 +10,14 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import type { Redis } from 'ioredis';
 import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes, randomInt, randomUUID } from 'crypto';
 import { safeEqual } from '../../common/security/safe-compare.js';
 import { normalizeContact } from './contact.util.js';
 import { ORGANIZER_SIGN_OPTIONS } from '../../common/security/jwt.constants.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { REDIS_CLIENT } from '../../redis/redis.module.js';
 import { NOTIFIER } from '../notifications/notifier.interface.js';
 import type { Notifier } from '../notifications/notifier.interface.js';
 import { RequestOtpDto } from './dto/request-otp.dto.js';
@@ -44,10 +46,8 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly config: ConfigService,
     @Inject(NOTIFIER) private readonly notifier: Notifier,
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
   ) {}
-
-  // Falhas recentes de login de admin (memória do processo; há um único admin)
-  private adminFailures: number[] = [];
 
   private otpInvalid() {
     // Mensagem única para não revelar se existe um código activo para o contacto
@@ -269,13 +269,14 @@ export class AuthService {
     return organizer;
   }
 
+  private readonly ADMIN_FAIL_KEY = 'admin:failures';
+
   async adminLogin(dto: AdminLoginDto) {
     const adminPhone = this.config.get<string>('ADMIN_PHONE') ?? '';
     const adminPassword = this.config.get<string>('ADMIN_PASSWORD') ?? '';
 
-    const now = Date.now();
-    this.adminFailures = this.adminFailures.filter((t) => now - t < ADMIN_LOCK_WINDOW_MS);
-    if (this.adminFailures.length >= ADMIN_MAX_FAILURES) {
+    const failures = Number(await this.redis.get(this.ADMIN_FAIL_KEY) ?? 0);
+    if (failures >= ADMIN_MAX_FAILURES) {
       throw new HttpException(
         { code: 'ADMIN_LOCKED', message: 'Demasiadas tentativas. Tenta novamente dentro de 15 minutos.' },
         HttpStatus.TOO_MANY_REQUESTS,
@@ -286,10 +287,12 @@ export class AuthService {
     const phoneOk = safeEqual(dto.phone, adminPhone);
     const passwordOk = safeEqual(dto.password, adminPassword);
     if (!adminPhone || !adminPassword || !phoneOk || !passwordOk) {
-      this.adminFailures.push(now);
+      const newCount = await this.redis.incr(this.ADMIN_FAIL_KEY);
+      // Apenas na primeira falha fixa o TTL; falhas seguintes não resetam o relógio
+      if (newCount === 1) await this.redis.expire(this.ADMIN_FAIL_KEY, Math.ceil(ADMIN_LOCK_WINDOW_MS / 1000));
       throw new UnauthorizedException({ code: 'ADMIN_INVALID_CREDENTIALS', message: 'Credenciais inválidas.' });
     }
-    this.adminFailures = [];
+    await this.redis.del(this.ADMIN_FAIL_KEY);
 
     // Garante que o organizer admin existe na BD
     let organizer = await this.prisma.organizer.findFirst({ where: { phone: adminPhone } });
