@@ -23,9 +23,20 @@ import { CurrentOrganizer } from '../../common/decorators/current-organizer.deco
 import type { OrganizerPayload } from '../../common/decorators/current-organizer.decorator.js';
 import { UpdateOrganizerDto } from '../organizers/dto/update-organizer.dto.js';
 import { ConfirmContactChangeDto, RequestContactChangeDto } from './dto/contact-change.dto.js';
+import { REFRESH_TOKEN_TTL_DAYS } from '../../common/security/jwt.constants.js';
+import { isDevEnv } from '../../config/runtime.js';
 
 const REFRESH_COOKIE = 'refresh_token';
-const REFRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const REFRESH_COOKIE_PATH = '/api/v1/auth';
+const REFRESH_TTL_MS = REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
+
+const refreshCookieOptions = () => ({
+  httpOnly: true,
+  secure: !isDevEnv(),
+  sameSite: 'lax' as const,
+  maxAge: REFRESH_TTL_MS,
+  path: REFRESH_COOKIE_PATH,
+});
 
 @ApiTags('auth')
 @Controller()
@@ -48,13 +59,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.authService.verifyOtp(dto);
-    res.cookie(REFRESH_COOKIE, result.refreshToken, {
-      httpOnly: true,
-      secure: process.env['NODE_ENV'] === 'production',
-      sameSite: 'lax',
-      maxAge: REFRESH_TTL_MS,
-      path: '/',
-    });
+    res.cookie(REFRESH_COOKIE, result.refreshToken, refreshCookieOptions());
     return { accessToken: result.accessToken, organizer: result.organizer };
   }
 
@@ -66,13 +71,7 @@ export class AuthController {
     @Res({ passthrough: true }) res: Response,
   ) {
     const result = await this.authService.adminLogin(dto);
-    res.cookie(REFRESH_COOKIE, result.refreshToken, {
-      httpOnly: true,
-      secure: process.env['NODE_ENV'] === 'production',
-      sameSite: 'lax',
-      maxAge: REFRESH_TTL_MS,
-      path: '/',
-    });
+    res.cookie(REFRESH_COOKIE, result.refreshToken, refreshCookieOptions());
     return { accessToken: result.accessToken };
   }
 
@@ -101,13 +100,7 @@ export class AuthController {
       });
     }
     const result = await this.authService.refresh(token);
-    res.cookie(REFRESH_COOKIE, result.refreshToken, {
-      httpOnly: true,
-      secure: process.env['NODE_ENV'] === 'production',
-      sameSite: 'lax',
-      maxAge: REFRESH_TTL_MS,
-      path: '/',
-    });
+    res.cookie(REFRESH_COOKIE, result.refreshToken, refreshCookieOptions());
     return { accessToken: result.accessToken };
   }
 
@@ -118,7 +111,7 @@ export class AuthController {
   async logout(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
     const token = (req.cookies as Record<string, string>)?.[REFRESH_COOKIE];
     if (token) await this.authService.logout(token);
-    res.clearCookie(REFRESH_COOKIE, { path: '/' });
+    res.clearCookie(REFRESH_COOKIE, { path: REFRESH_COOKIE_PATH });
   }
 
   @ApiBearerAuth()

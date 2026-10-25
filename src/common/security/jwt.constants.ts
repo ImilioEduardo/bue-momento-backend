@@ -28,3 +28,5 @@ export const GUEST_VERIFY_OPTIONS: JwtVerifyOptions = {
   issuer: JWT_ISSUER,
   audience: JWT_AUDIENCE_GUEST,
 };
+
+export const REFRESH_TOKEN_TTL_DAYS = 30;

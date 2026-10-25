@@ -14,7 +14,7 @@ export class WebhooksController {
   async handleStream(
     @Req() req: Request,
     @Body() body: Record<string, unknown>,
-    @Headers('webhook-signature') signature: string | undefined,
+    @Headers('bunny-signature') signature: string | undefined,
   ) {
     const rawBody = (req as Request & { rawBody?: Buffer }).rawBody ?? Buffer.alloc(0);
     this.webhooks.verifyStreamSignature(rawBody, signature);

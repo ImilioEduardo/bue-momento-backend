@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { createHash, createHmac } from 'crypto';
 
 export interface IStreamClient {
   createTusUpload(params: {
@@ -14,63 +15,57 @@ export interface IStreamClient {
   deleteVideo(uid: string): Promise<void>;
 }
 
+const BUNNY_API_BASE = 'https://video.bunnycdn.com';
+
 @Injectable()
 export class StreamClient implements IStreamClient {
   private readonly logger = new Logger(StreamClient.name);
-  private readonly tokenCache = new Map<string, { token: string; expiresAt: number }>();
 
   constructor(private readonly config: ConfigService) {}
 
   get isConfigured(): boolean {
     return !!(
-      this.config.get<string>('CF_ACCOUNT_ID') &&
-      this.config.get<string>('CF_STREAM_API_TOKEN')
+      this.config.get<string>('BUNNY_LIBRARY_ID') &&
+      this.config.get<string>('BUNNY_API_KEY')
     );
   }
 
-  private get accountId() {
-    return this.config.get<string>('CF_ACCOUNT_ID')!;
+  private get libraryId() {
+    return this.config.get<string>('BUNNY_LIBRARY_ID')!;
   }
-  private get apiToken() {
-    return this.config.get<string>('CF_STREAM_API_TOKEN')!;
+  private get apiKey() {
+    return this.config.get<string>('BUNNY_API_KEY')!;
   }
-
-  /** Vídeos privados: só acessíveis com token assinado (por omissão true). */
+  private get cdnHostname() {
+    return this.config.get<string>('BUNNY_CDN_HOSTNAME') ?? '';
+  }
+  // Token key for CDN token authentication (set in pull zone settings)
+  private get tokenKey() {
+    return this.config.get<string>('BUNNY_TOKEN_KEY') ?? '';
+  }
   private get requireSigned(): boolean {
-    const v = this.config.get<boolean | string>('STREAM_REQUIRE_SIGNED');
-    return v === undefined ? true : v === true || v === 'true';
+    return !!this.tokenKey;
   }
 
-  private get customerHost() {
-    const subdomain = this.config.get<string>('CF_STREAM_CUSTOMER_SUBDOMAIN') ?? '';
-    return subdomain ? `https://customer-${subdomain}.cloudflarestream.com` : '';
-  }
-
-  /** Token de acesso de curta duração para um vídeo com requireSignedURLs.
-   *  Reutiliza o token em cache enquanto tiver mais de 5 min de validade, evitando
-   *  N chamadas à API por galeria (uma por vídeo privado).
+  /**
+   * Bunny CDN token authentication.
+   * SHA256(tokenKey + path + expires) → base64url
+   * https://support.bunny.net/hc/en-us/articles/360016055099
    */
-  private async signedToken(uid: string, ttlSec = 3600): Promise<string> {
-    const now = Date.now();
-    const cached = this.tokenCache.get(uid);
-    if (cached && cached.expiresAt - now > 5 * 60 * 1000) {
-      return cached.token;
-    }
+  private cdnToken(path: string, expires: number): string {
+    return createHash('sha256')
+      .update(this.tokenKey + path + expires)
+      .digest('base64url');
+  }
 
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}/token`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.apiToken}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({ exp: Math.floor(now / 1000) + ttlSec }),
-      },
-    );
-    if (!res.ok) throw new Error(`Stream token API error ${res.status}`);
-    const data = (await res.json()) as { result?: { token?: string } };
-    if (!data.result?.token) throw new Error('Stream token API returned no token');
-
-    this.tokenCache.set(uid, { token: data.result.token, expiresAt: now + ttlSec * 1000 });
-    return data.result.token;
+  /**
+   * Signed token for iframe embed.
+   * SHA256(tokenKey + videoId + expires) → hex
+   */
+  private iframeToken(uid: string, expires: number): string {
+    return createHash('sha256')
+      .update(this.tokenKey + uid + expires)
+      .digest('hex');
   }
 
   async createTusUpload(params: {
@@ -79,99 +74,117 @@ export class StreamClient implements IStreamClient {
     maxDurationSec: number;
     expiryISO: string;
   }): Promise<{ tusUploadUrl: string; streamUid: string }> {
+    // Step 1: Create a video object to get the GUID
+    const createRes = await fetch(`${BUNNY_API_BASE}/library/${this.libraryId}/videos`, {
+      method: 'POST',
+      headers: { AccessKey: this.apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title: params.submissionId }),
+    });
+    if (!createRes.ok) {
+      throw new Error(`Bunny create video error ${createRes.status}: ${await createRes.text()}`);
+    }
+    const { guid: videoId } = (await createRes.json()) as { guid: string };
+
+    // Step 2: Initiate TUS upload with HMAC-authenticated headers
+    // Signature = SHA256(apiKey + expiresAt + libraryId + videoId)
+    const expiresAt = Math.floor(new Date(params.expiryISO).getTime() / 1000);
+    const signature = createHash('sha256')
+      .update(this.apiKey + expiresAt + this.libraryId + videoId)
+      .digest('hex');
+
     const b64 = (s: string) => Buffer.from(s).toString('base64');
-    // TUS Upload-Metadata: comma-separated key base64(value) pairs
-    // https://developers.cloudflare.com/stream/uploading-videos/direct-creator-uploads/
     const metadata = [
-      `maxdurationseconds ${b64(String(params.maxDurationSec))}`,
-      `expiry ${b64(params.expiryISO)}`,
-      `name ${b64(params.submissionId)}`,
-      ...(this.requireSigned ? ['requiresignedurls'] : []),
+      `filetype ${b64('video/mp4')}`,
+      `title ${b64(params.submissionId)}`,
     ].join(',');
 
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream?direct_user=true`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${this.apiToken}`,
-          'Tus-Resumable': '1.0.0',
-          'Upload-Length': String(params.uploadLength),
-          'Upload-Metadata': metadata,
-        },
+    const tusRes = await fetch(`${BUNNY_API_BASE}/tusupload`, {
+      method: 'POST',
+      headers: {
+        AuthorizationSignature: signature,
+        AuthorizationExpire: String(expiresAt),
+        VideoId: videoId,
+        LibraryId: this.libraryId,
+        'Tus-Resumable': '1.0.0',
+        'Upload-Length': String(params.uploadLength),
+        'Upload-Metadata': metadata,
       },
-    );
-
-    if (!res.ok) {
-      throw new Error(`Stream API error ${res.status}: ${await res.text()}`);
+    });
+    if (!tusRes.ok) {
+      throw new Error(`Bunny TUS initiate error ${tusRes.status}: ${await tusRes.text()}`);
     }
 
-    const tusUploadUrl = res.headers.get('location') ?? '';
-    const streamUid = res.headers.get('stream-media-id') ?? '';
-
-    if (!tusUploadUrl || !streamUid) {
-      throw new Error('Stream API did not return location or stream-media-id headers');
+    const tusUploadUrl = tusRes.headers.get('location') ?? '';
+    if (!tusUploadUrl) {
+      throw new Error('Bunny TUS API did not return a location header');
     }
 
-    return { tusUploadUrl, streamUid };
+    return { tusUploadUrl, streamUid: videoId };
   }
 
-  async requestMp4Download(uid: string): Promise<void> {
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}/downloads`,
-      {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      },
-    );
-    if (!res.ok) {
-      // Non-fatal: MP4 may already be generating
-      this.logger.warn(`requestMp4Download ${uid} → ${res.status}`);
-    }
-  }
+  // Bunny automatically transcodes all uploads — no explicit MP4 request needed.
+  async requestMp4Download(_uid: string): Promise<void> {}
 
   async getMp4DownloadUrl(uid: string): Promise<string> {
-    if (!this.isConfigured) return `dev://download/${uid}`;
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}/downloads`,
-      { headers: { Authorization: `Bearer ${this.apiToken}` } },
-    );
-    if (!res.ok) throw new Error(`Stream API error ${res.status}`);
-    const data = (await res.json()) as {
-      result?: { default?: { url?: string; status?: string } };
-    };
-    const url = data.result?.default?.url;
-    if (!url) throw new Error(`MP4 for ${uid} not ready yet`);
-    // Com requireSignedURLs o uid no caminho tem de ser substituído por um token assinado
-    return this.requireSigned ? url.replace(`/${uid}/`, `/${await this.signedToken(uid, 3600)}/`) : url;
+    if (!this.isConfigured || !this.cdnHostname) return `dev://download/${uid}`;
+    const path = `/${uid}/play_720p.mp4`;
+    if (!this.requireSigned) {
+      return `https://${this.cdnHostname}${path}`;
+    }
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    const token = this.cdnToken(path, expires);
+    return `https://${this.cdnHostname}${path}?token=${token}&expires=${expires}`;
   }
 
-  /** URL de reprodução (iframe) e miniatura; assinadas quando os vídeos são privados. */
-  async getMediaUrls(uid: string, storedThumbnail?: string | null): Promise<{ playbackUrl: string; thumbnailUrl?: string }> {
-    const host = this.customerHost;
-    if (!host || !this.isConfigured) return { playbackUrl: `dev://watch/${uid}`, thumbnailUrl: storedThumbnail ?? undefined };
-    if (!this.requireSigned) {
-      return { playbackUrl: `${host}/${uid}/iframe`, thumbnailUrl: storedThumbnail ?? undefined };
+  async getMediaUrls(
+    uid: string,
+    storedThumbnail?: string | null,
+  ): Promise<{ playbackUrl: string; thumbnailUrl?: string }> {
+    if (!this.isConfigured) {
+      return { playbackUrl: `dev://watch/${uid}`, thumbnailUrl: storedThumbnail ?? undefined };
     }
-    const token = await this.signedToken(uid, 3600);
-    return {
-      playbackUrl: `${host}/${token}/iframe`,
-      thumbnailUrl: `${host}/${token}/thumbnails/thumbnail.jpg`,
-    };
+
+    const iframeBase = `https://iframe.mediadelivery.net/embed/${this.libraryId}/${uid}`;
+    const thumbPath = `/${uid}/thumbnail.jpg`;
+
+    if (!this.requireSigned) {
+      return {
+        playbackUrl: iframeBase,
+        thumbnailUrl: this.cdnHostname
+          ? `https://${this.cdnHostname}${thumbPath}`
+          : (storedThumbnail ?? undefined),
+      };
+    }
+
+    const expires = Math.floor(Date.now() / 1000) + 3600;
+    const playbackUrl = `${iframeBase}?token=${this.iframeToken(uid, expires)}&expires=${expires}`;
+    const thumbnailUrl = this.cdnHostname
+      ? `https://${this.cdnHostname}${thumbPath}?token=${this.cdnToken(thumbPath, expires)}&expires=${expires}`
+      : (storedThumbnail ?? undefined);
+
+    return { playbackUrl, thumbnailUrl };
   }
 
   async deleteVideo(uid: string): Promise<void> {
     if (!this.isConfigured) return;
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${this.accountId}/stream/${uid}`,
-      {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${this.apiToken}` },
-      },
-    );
-    // 404 means already deleted — treat as success
+    const res = await fetch(`${BUNNY_API_BASE}/library/${this.libraryId}/videos/${uid}`, {
+      method: 'DELETE',
+      headers: { AccessKey: this.apiKey },
+    });
     if (!res.ok && res.status !== 404) {
       this.logger.warn(`deleteVideo ${uid} failed: HTTP ${res.status}`);
+    }
+  }
+
+  /**
+   * Verifies a Bunny Stream webhook signature.
+   * Bunny sends: Bunny-Signature: HMAC-SHA256(webhookSecret, rawBody) in hex.
+   * https://docs.bunny.net/docs/stream-webhook
+   */
+  verifyWebhookSignature(rawBody: Buffer, signature: string | undefined, secret: string): void {
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
+    if (!signature || signature.toLowerCase() !== expected) {
+      throw new Error('BUNNY_SIGNATURE_INVALID');
     }
   }
 }

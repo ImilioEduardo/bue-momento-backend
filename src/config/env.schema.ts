@@ -12,12 +12,14 @@ export const envSchema = Joi.object({
   JWT_GUEST_SECRET: Joi.string().min(32).required(),
   WEB_URL: Joi.string().uri().required(),
   PUBLIC_WEB_URL: Joi.string().uri().required(),
-  CF_ACCOUNT_ID: Joi.string().default(''),
-  CF_STREAM_API_TOKEN: Joi.string().default(''),
-  CF_STREAM_CUSTOMER_SUBDOMAIN: Joi.string().default(''),
-  STREAM_WEBHOOK_SECRET: Joi.string().default(''),
-  // Vídeos privados por omissão: reprodução/download só com token assinado de curta duração
-  STREAM_REQUIRE_SIGNED: Joi.boolean().default(true),
+  // Bunny Stream — video library settings
+  BUNNY_LIBRARY_ID: Joi.string().default(''),
+  BUNNY_API_KEY: Joi.string().default(''),
+  // Pull zone hostname, e.g. vz-abc123.b-cdn.net
+  BUNNY_CDN_HOSTNAME: Joi.string().default(''),
+  // Token authentication key (set in pull zone settings); leave empty to disable signed URLs
+  BUNNY_TOKEN_KEY: Joi.string().default(''),
+  BUNNY_WEBHOOK_SECRET: Joi.string().default(''),
   R2_ACCOUNT_ID: Joi.string().default(''),
   R2_ACCESS_KEY_ID: Joi.string().default(''),
   R2_SECRET_ACCESS_KEY: Joi.string().default(''),
@@ -86,8 +88,8 @@ export const envSchema = Joi.object({
   }
   // O webhook ProxyPay é assinado com PROXYPAY_WEBHOOK_SECRET ou, na falta deste, com a API key
   if (env['PAYMENT_PROVIDER'] === 'proxypay') need('PROXYPAY_API_KEY', 8);
-  // Se o Stream está configurado, os webhooks dele têm de ser assinados
-  if (str('CF_STREAM_API_TOKEN')) need('STREAM_WEBHOOK_SECRET', 16);
+  // Se o Bunny Stream está configurado, os webhooks têm de ter segredo
+  if (str('BUNNY_API_KEY')) need('BUNNY_WEBHOOK_SECRET', 16);
 
   if (problems.length > 0) {
     return helpers.message({ custom: `Configuração insegura para produção — corrige: ${problems.join('; ')}` });

@@ -15,7 +15,7 @@ import * as bcrypt from 'bcryptjs';
 import { createHash, randomBytes, randomInt, randomUUID } from 'crypto';
 import { safeEqual } from '../../common/security/safe-compare.js';
 import { normalizeContact } from './contact.util.js';
-import { ORGANIZER_SIGN_OPTIONS } from '../../common/security/jwt.constants.js';
+import { ORGANIZER_SIGN_OPTIONS, REFRESH_TOKEN_TTL_DAYS } from '../../common/security/jwt.constants.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { REDIS_CLIENT } from '../../redis/redis.module.js';
 import { NOTIFIER } from '../notifications/notifier.interface.js';
@@ -33,7 +33,6 @@ const OTP_MAX_ATTEMPTS = 5;
 const ADMIN_LOCK_WINDOW_MS = 15 * 60 * 1000;
 const ADMIN_MAX_FAILURES = 5;
 const ACCESS_TOKEN_TTL = '15m';
-const REFRESH_TOKEN_TTL_DAYS = 30;
 // Tolerância para renovações simultâneas legítimas antes de tratar reutilização como roubo
 const REFRESH_REUSE_GRACE_MS = 10_000;
 

@@ -1,22 +1,28 @@
 import { BadRequestException, Inject, Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { createHmac } from 'crypto';
 import { safeEqual } from '../../common/security/safe-compare.js';
-
-// Tolerância para o timestamp da assinatura do Stream (anti-replay)
-const STREAM_SIGNATURE_TOLERANCE_SEC = 5 * 60;
 import { PrismaService } from '../../prisma/prisma.service.js';
 import { StreamClient } from '../media/stream.client.js';
 import { PaymentsService } from '../payments/payments.service.js';
 import { PAYMENT_PROVIDER } from '../payments/payment-provider.interface.js';
 import type { IPaymentProvider } from '../payments/payment-provider.interface.js';
 
+/**
+ * Bunny Stream webhook payload.
+ * Status values: 0=Created 1=Uploaded 2=Processing 3=Transcoding 4=Finished 5=Error 6=UploadFailed
+ * https://docs.bunny.net/docs/stream-webhook
+ */
 export interface StreamWebhookPayload {
-  uid: string;
-  status: { state: string };
-  duration?: number;
-  thumbnail?: string;
+  VideoLibraryId: number;
+  VideoGuid: string;
+  Status: number;
+  Duration?: number;
+  ThumbnailFileName?: string;
 }
+
+const BUNNY_STATUS_FINISHED = 4;
+const BUNNY_STATUS_ERROR = 5;
+const BUNNY_STATUS_UPLOAD_FAILED = 6;
 
 @Injectable()
 export class WebhooksService {
@@ -30,51 +36,32 @@ export class WebhooksService {
     @Inject(PAYMENT_PROVIDER) private readonly paymentProvider: IPaymentProvider,
   ) {}
 
-  // Verifies Cloudflare Stream webhook signature.
-  // Header format: "time=<unix_ts>,sig1=<hmac_sha256_hex>"
-  // Signature = HMAC-SHA256(secret, "<time>.<rawBody>")
+  /**
+   * Verifies a Bunny Stream webhook signature.
+   * Bunny sends: Bunny-Signature: HMAC-SHA256(webhookSecret, rawBody) as hex.
+   * Configure BUNNY_WEBHOOK_SECRET to match the secret set in the Bunny library settings.
+   * Fails closed: rejects all webhooks if the secret is not configured.
+   */
   verifyStreamSignature(rawBody: Buffer, signatureHeader: string | undefined): void {
-    const secret = this.config.get<string>('STREAM_WEBHOOK_SECRET') ?? '';
-    // Falha fechado: sem segredo configurado nenhum webhook é aceite
+    const secret = this.config.get<string>('BUNNY_WEBHOOK_SECRET') ?? '';
     if (!secret) {
       throw new UnauthorizedException({ code: 'WEBHOOK_NOT_CONFIGURED' });
     }
-
     if (!signatureHeader) {
       throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_MISSING' });
     }
 
-    const parts: Record<string, string> = {};
-    for (const part of signatureHeader.split(',')) {
-      const idx = part.indexOf('=');
-      if (idx > 0) parts[part.slice(0, idx)] = part.slice(idx + 1);
-    }
-
-    const time = parts['time'];
-    const sig1 = parts['sig1'];
-    if (!time || !sig1) {
-      throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_MALFORMED' });
-    }
-
-    const ts = Number(time);
-    const nowSec = Math.floor(Date.now() / 1000);
-    if (!Number.isFinite(ts) || Math.abs(nowSec - ts) > STREAM_SIGNATURE_TOLERANCE_SEC) {
-      throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_EXPIRED' });
-    }
-
-    const expected = createHmac('sha256', secret)
-      .update(`${time}.${rawBody.toString('utf8')}`)
-      .digest('hex');
-
-    if (!safeEqual(sig1.toLowerCase(), expected)) {
+    try {
+      this.stream.verifyWebhookSignature(rawBody, signatureHeader, secret);
+    } catch {
       throw new UnauthorizedException({ code: 'WEBHOOK_SIGNATURE_INVALID' });
     }
   }
 
   async handleStreamEvent(payload: StreamWebhookPayload): Promise<void> {
-    const uid = payload.uid;
-    const state = payload.status?.state;
-    if (!uid || !state) return;
+    const uid = payload.VideoGuid;
+    const status = payload.Status;
+    if (!uid || status == null) return;
 
     const submission = await this.prisma.submission.findUnique({
       where: { streamUid: uid },
@@ -88,25 +75,27 @@ export class WebhooksService {
     });
 
     if (!submission) {
-      this.logger.warn(`Stream webhook for unknown uid=${uid}, state=${state}`);
+      this.logger.warn(`Bunny webhook for unknown VideoGuid=${uid}, status=${status}`);
       return;
     }
 
-    if (state === 'readyToStream') {
+    if (status === BUNNY_STATUS_FINISHED) {
       if (submission.status === 'READY') return;
 
       const event = submission.assignment.guest.event;
       const maxSec = event.extendedMaxSeconds ?? event.plan?.maxVideoSeconds ?? 30;
+      const durationSec = payload.Duration ?? null;
 
-      if (payload.duration != null && payload.duration > maxSec + 1) {
+      if (durationSec != null && durationSec > maxSec + 1) {
         this.logger.warn(
-          `Submission ${submission.id} exceeds max duration (${payload.duration}s > ${maxSec}s), marking FAILED`,
+          `Submission ${submission.id} exceeds max duration (${durationSec}s > ${maxSec}s), marking FAILED`,
         );
         await this.prisma.submission.update({ where: { id: submission.id }, data: { status: 'FAILED' } });
         await this.stream.deleteVideo(uid);
         return;
       }
 
+      // requestMp4Download is a no-op for Bunny (auto-transcodes), kept for interface symmetry
       await this.stream.requestMp4Download(uid);
 
       const moderationStatus = event.moderation ? 'PENDING_APPROVAL' : 'APPROVED';
@@ -117,8 +106,8 @@ export class WebhooksService {
           data: {
             status: 'READY',
             moderationStatus,
-            durationSec: payload.duration ?? null,
-            thumbnailUrl: payload.thumbnail ?? null,
+            durationSec,
+            thumbnailUrl: payload.ThumbnailFileName ?? null,
             readyAt: new Date(),
           },
         }),
@@ -129,12 +118,12 @@ export class WebhooksService {
       ]);
 
       this.logger.log(
-        `Submission ${submission.id} → READY moderationStatus=${moderationStatus} (duration=${payload.duration}s)`,
+        `Submission ${submission.id} → READY moderationStatus=${moderationStatus} (duration=${durationSec}s)`,
       );
-    } else if (state === 'error' || state === 'errored') {
+    } else if (status === BUNNY_STATUS_ERROR || status === BUNNY_STATUS_UPLOAD_FAILED) {
       if (submission.status === 'FAILED') return;
       await this.prisma.submission.update({ where: { id: submission.id }, data: { status: 'FAILED' } });
-      this.logger.warn(`Submission ${submission.id} → FAILED (stream state=${state})`);
+      this.logger.warn(`Submission ${submission.id} → FAILED (Bunny status=${status})`);
     }
   }
 
@@ -143,7 +132,6 @@ export class WebhooksService {
     rawBody: Buffer,
     headers: Record<string, string>,
   ): Promise<void> {
-    // Only process webhooks for the configured provider
     if (provider !== this.paymentProvider.providerName) {
       this.logger.warn(
         `Payment webhook for provider=${provider} but configured=${this.paymentProvider.providerName} — ignoring`,
@@ -163,7 +151,6 @@ export class WebhooksService {
     }
 
     if (event.status === 'PAID') {
-      // O montante pago tem de corresponder exactamente ao valor da referência
       if (event.amount === undefined || Math.round(event.amount) !== payment.amountKz) {
         this.logger.error(
           `Payment webhook amount mismatch for payment ${payment.id}: expected ${payment.amountKz}, got ${event.amount ?? 'none'}`,
