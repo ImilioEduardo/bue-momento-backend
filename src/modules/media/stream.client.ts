@@ -86,10 +86,10 @@ export class StreamClient implements IStreamClient {
     const { guid: videoId } = (await createRes.json()) as { guid: string };
 
     // Step 2: Initiate TUS upload with HMAC-authenticated headers
-    // Signature = SHA256(apiKey + expiresAt + libraryId + videoId)
+    // Signature = SHA256(libraryId + apiKey + expiresAt + videoId)
     const expiresAt = Math.floor(new Date(params.expiryISO).getTime() / 1000);
     const signature = createHash('sha256')
-      .update(this.apiKey + expiresAt + this.libraryId + videoId)
+      .update(this.libraryId + this.apiKey + expiresAt + videoId)
       .digest('hex');
 
     const b64 = (s: string) => Buffer.from(s).toString('base64');
