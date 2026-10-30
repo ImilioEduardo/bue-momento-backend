@@ -121,10 +121,11 @@ export class StreamClient implements IStreamClient {
       throw new Error(`Bunny TUS initiate error ${tusRes.status}: ${await tusRes.text()}`);
     }
 
-    const tusUploadUrl = tusRes.headers.get('location') ?? '';
-    if (!tusUploadUrl) {
+    const location = tusRes.headers.get('location') ?? '';
+    if (!location) {
       throw new Error('Bunny TUS API did not return a location header');
     }
+    const tusUploadUrl = location.startsWith('http') ? location : `${BUNNY_API_BASE}${location}`;
 
     return {
       tusUploadUrl,
