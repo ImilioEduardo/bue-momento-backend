@@ -439,7 +439,7 @@ export class PublicService {
     }
 
     const expiryISO = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();
-    const { tusUploadUrl, streamUid, tusHeaders } = await this.stream.createTusUpload({
+    const { tusEndpoint, streamUid, tusHeaders } = await this.stream.createTusUpload({
       submissionId: submission.id,
       uploadLength,
       maxDurationSec: maxVideoSeconds,
@@ -451,7 +451,7 @@ export class PublicService {
       data: { streamUid },
     });
 
-    return { submissionId: submission.id, tusUploadUrl, tusHeaders };
+    return { submissionId: submission.id, tusEndpoint, tusHeaders };
   }
 
   private async createPhotoSubmission(

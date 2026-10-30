@@ -15,7 +15,7 @@ export interface IStreamClient {
     uploadLength: number;
     maxDurationSec: number;
     expiryISO: string;
-  }): Promise<{ tusUploadUrl: string; streamUid: string; tusHeaders: TusHeaders }>;
+  }): Promise<{ tusEndpoint: string; streamUid: string; tusHeaders: TusHeaders }>;
   requestMp4Download(uid: string): Promise<void>;
   getMp4DownloadUrl(uid: string): Promise<string>;
   getMediaUrls(uid: string, storedThumbnail?: string | null): Promise<{ playbackUrl: string; thumbnailUrl?: string }>;
@@ -80,7 +80,7 @@ export class StreamClient implements IStreamClient {
     uploadLength: number;
     maxDurationSec: number;
     expiryISO: string;
-  }): Promise<{ tusUploadUrl: string; streamUid: string; tusHeaders: TusHeaders }> {
+  }): Promise<{ tusEndpoint: string; streamUid: string; tusHeaders: TusHeaders }> {
     // Step 1: Create a video object to get the GUID
     const createRes = await fetch(`${BUNNY_API_BASE}/library/${this.libraryId}/videos`, {
       method: 'POST',
@@ -92,43 +92,16 @@ export class StreamClient implements IStreamClient {
     }
     const { guid: videoId } = (await createRes.json()) as { guid: string };
 
-    // Step 2: Initiate TUS upload with HMAC-authenticated headers
+    // Step 2: Compute TUS auth headers — the browser creates the TUS session directly
+    // to avoid CORS issues with the HEAD request tus-js-client would make otherwise.
     // Signature = SHA256(libraryId + apiKey + expiresAt + videoId)
     const expiresAt = Math.floor(new Date(params.expiryISO).getTime() / 1000);
     const signature = createHash('sha256')
       .update(this.libraryId + this.apiKey + expiresAt + videoId)
       .digest('hex');
 
-    const b64 = (s: string) => Buffer.from(s).toString('base64');
-    const metadata = [
-      `filetype ${b64('video/mp4')}`,
-      `title ${b64(params.submissionId)}`,
-    ].join(',');
-
-    const tusRes = await fetch(`${BUNNY_API_BASE}/tusupload`, {
-      method: 'POST',
-      headers: {
-        AuthorizationSignature: signature,
-        AuthorizationExpire: String(expiresAt),
-        VideoId: videoId,
-        LibraryId: this.libraryId,
-        'Tus-Resumable': '1.0.0',
-        'Upload-Length': String(params.uploadLength),
-        'Upload-Metadata': metadata,
-      },
-    });
-    if (!tusRes.ok) {
-      throw new Error(`Bunny TUS initiate error ${tusRes.status}: ${await tusRes.text()}`);
-    }
-
-    const location = tusRes.headers.get('location') ?? '';
-    if (!location) {
-      throw new Error('Bunny TUS API did not return a location header');
-    }
-    const tusUploadUrl = location.startsWith('http') ? location : `${BUNNY_API_BASE}${location}`;
-
     return {
-      tusUploadUrl,
+      tusEndpoint: `${BUNNY_API_BASE}/tusupload`,
       streamUid: videoId,
       tusHeaders: {
         AuthorizationSignature: signature,
