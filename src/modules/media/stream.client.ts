@@ -2,13 +2,20 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, createHmac } from 'crypto';
 
+export interface TusHeaders {
+  AuthorizationSignature: string;
+  AuthorizationExpire: string;
+  VideoId: string;
+  LibraryId: string;
+}
+
 export interface IStreamClient {
   createTusUpload(params: {
     submissionId: string;
     uploadLength: number;
     maxDurationSec: number;
     expiryISO: string;
-  }): Promise<{ tusUploadUrl: string; streamUid: string }>;
+  }): Promise<{ tusUploadUrl: string; streamUid: string; tusHeaders: TusHeaders }>;
   requestMp4Download(uid: string): Promise<void>;
   getMp4DownloadUrl(uid: string): Promise<string>;
   getMediaUrls(uid: string, storedThumbnail?: string | null): Promise<{ playbackUrl: string; thumbnailUrl?: string }>;
@@ -119,7 +126,16 @@ export class StreamClient implements IStreamClient {
       throw new Error('Bunny TUS API did not return a location header');
     }
 
-    return { tusUploadUrl, streamUid: videoId };
+    return {
+      tusUploadUrl,
+      streamUid: videoId,
+      tusHeaders: {
+        AuthorizationSignature: signature,
+        AuthorizationExpire: String(expiresAt),
+        VideoId: videoId,
+        LibraryId: this.libraryId,
+      },
+    };
   }
 
   // Bunny automatically transcodes all uploads — no explicit MP4 request needed.
