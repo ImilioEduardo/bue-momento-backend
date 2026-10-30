@@ -80,7 +80,7 @@ export class StreamClient implements IStreamClient {
     uploadLength: number;
     maxDurationSec: number;
     expiryISO: string;
-  }): Promise<{ tusUploadUrl: string; streamUid: string }> {
+  }): Promise<{ tusUploadUrl: string; streamUid: string; tusHeaders: TusHeaders }> {
     // Step 1: Create a video object to get the GUID
     const createRes = await fetch(`${BUNNY_API_BASE}/library/${this.libraryId}/videos`, {
       method: 'POST',
