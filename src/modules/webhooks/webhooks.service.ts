@@ -107,7 +107,9 @@ export class WebhooksService {
             status: 'READY',
             moderationStatus,
             durationSec,
-            thumbnailUrl: payload.ThumbnailFileName ?? null,
+            // ThumbnailFileName is a bare filename (e.g. "thumbnail.jpg"), not a URL.
+            // getMediaUrls constructs the CDN URL from /{uid}/thumbnail.jpg at read time.
+            thumbnailUrl: null,
             readyAt: new Date(),
           },
         }),

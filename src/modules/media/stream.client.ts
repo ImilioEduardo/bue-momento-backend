@@ -115,9 +115,13 @@ export class StreamClient implements IStreamClient {
   // Bunny automatically transcodes all uploads — no explicit MP4 request needed.
   async requestMp4Download(_uid: string): Promise<void> {}
 
+  private get mp4Resolution(): string {
+    return this.config.get<string>('BUNNY_MP4_RESOLUTION') ?? '720p';
+  }
+
   async getMp4DownloadUrl(uid: string): Promise<string> {
     if (!this.isConfigured || !this.cdnHostname) return `dev://download/${uid}`;
-    const path = `/${uid}/play_720p.mp4`;
+    const path = `/${uid}/play_${this.mp4Resolution}.mp4`;
     if (!this.requireSigned) {
       return `https://${this.cdnHostname}${path}`;
     }
@@ -171,9 +175,9 @@ export class StreamClient implements IStreamClient {
    * Bunny sends: Bunny-Signature: HMAC-SHA256(webhookSecret, rawBody) in hex.
    * https://docs.bunny.net/docs/stream-webhook
    */
-  verifyWebhookSignature(rawBody: Buffer, signature: string | undefined, secret: string): void {
+  verifyWebhookSignature(rawBody: Buffer, signature: string, secret: string): void {
     const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-    if (!signature || signature.toLowerCase() !== expected) {
+    if (signature.toLowerCase() !== expected) {
       throw new Error('BUNNY_SIGNATURE_INVALID');
     }
   }

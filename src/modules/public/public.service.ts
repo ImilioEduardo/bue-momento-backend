@@ -431,11 +431,12 @@ export class PublicService {
     });
 
     if (!this.stream.isConfigured) {
-      // Dev stub: point to the mock TUS endpoint served by this API
+      // Dev stub: point to the mock TUS endpoint served by this API.
+      // Returns tusEndpoint (same shape as the prod path) so frontend code works in both environments.
       const port = this.config.get<string>('PORT') ?? '3001';
-      const tusUploadUrl = `http://localhost:${port}/api/v1/dev/tus/${submission.id}`;
+      const tusEndpoint = `http://localhost:${port}/api/v1/dev/tus/${submission.id}`;
       this.devTusUploads.set(submission.id, { offset: 0, total: 0 });
-      return { submissionId: submission.id, tusUploadUrl };
+      return { submissionId: submission.id, tusEndpoint };
     }
 
     const expiryISO = new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString();

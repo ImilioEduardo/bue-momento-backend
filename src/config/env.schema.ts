@@ -20,6 +20,8 @@ export const envSchema = Joi.object({
   // Token authentication key (set in pull zone settings); leave empty to disable signed URLs
   BUNNY_TOKEN_KEY: Joi.string().default(''),
   BUNNY_WEBHOOK_SECRET: Joi.string().default(''),
+  // MP4 resolution profile name as Bunny names the file (default: 720p → play_720p.mp4)
+  BUNNY_MP4_RESOLUTION: Joi.string().default('720p'),
   R2_ACCOUNT_ID: Joi.string().default(''),
   R2_ACCESS_KEY_ID: Joi.string().default(''),
   R2_SECRET_ACCESS_KEY: Joi.string().default(''),
@@ -88,8 +90,14 @@ export const envSchema = Joi.object({
   }
   // O webhook ProxyPay é assinado com PROXYPAY_WEBHOOK_SECRET ou, na falta deste, com a API key
   if (env['PAYMENT_PROVIDER'] === 'proxypay') need('PROXYPAY_API_KEY', 8);
-  // Se o Bunny Stream está configurado, os webhooks têm de ter segredo
-  if (str('BUNNY_API_KEY')) need('BUNNY_WEBHOOK_SECRET', 16);
+  // Se o Bunny Stream está configurado, os webhooks e a library ID têm de estar completos
+  if (str('BUNNY_API_KEY')) {
+    need('BUNNY_WEBHOOK_SECRET', 16);
+    if (!str('BUNNY_LIBRARY_ID')) problems.push('BUNNY_LIBRARY_ID (obrigatório quando BUNNY_API_KEY está definido)');
+  }
+  if (str('BUNNY_LIBRARY_ID') && !str('BUNNY_API_KEY')) {
+    problems.push('BUNNY_API_KEY (obrigatório quando BUNNY_LIBRARY_ID está definido)');
+  }
 
   if (problems.length > 0) {
     return helpers.message({ custom: `Configuração insegura para produção — corrige: ${problems.join('; ')}` });

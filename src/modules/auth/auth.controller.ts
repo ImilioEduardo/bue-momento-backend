@@ -27,6 +27,11 @@ import { REFRESH_TOKEN_TTL_DAYS } from '../../common/security/jwt.constants.js';
 import { isDevEnv } from '../../config/runtime.js';
 
 const REFRESH_COOKIE = 'refresh_token';
+// Scoped to /api/v1/auth so the browser never sends this cookie to other API paths.
+// IMPORTANT: all admin routes (/api/v1/admin/*) read this cookie via the Next.js server-side
+// proxy, which forwards the raw Cookie header from the browser's original request.
+// Direct browser-to-API calls to /api/v1/admin/* would not receive the cookie — that path
+// is not supported and the architecture relies on the proxy being in the request chain.
 const REFRESH_COOKIE_PATH = '/api/v1/auth';
 const REFRESH_TTL_MS = REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
 

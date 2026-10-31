@@ -86,18 +86,25 @@ export class AuthService {
       data: { expiresAt: new Date(now) },
     });
 
-    await this.prisma.otpCode.create({
+    const otpRecord = await this.prisma.otpCode.create({
       data: { target, codeHash, expiresAt },
     });
 
-    if (deliverTo.includes('@')) {
-      await this.notifier.sendEmail(
-        deliverTo,
-        'O teu código de acesso — Bué Momentos',
-        `<p>O teu código é: <strong>${code}</strong></p><p>Válido por 10 minutos.</p>`,
-      );
-    } else {
-      await this.notifier.sendSms(deliverTo, `Bué Momentos: o teu código é ${code}. Válido 10 min.`);
+    try {
+      if (deliverTo.includes('@')) {
+        await this.notifier.sendEmail(
+          deliverTo,
+          'O teu código de acesso — Bué Momentos',
+          `<p>O teu código é: <strong>${code}</strong></p><p>Válido por 10 minutos.</p>`,
+        );
+      } else {
+        await this.notifier.sendSms(deliverTo, `Bué Momentos: o teu código é ${code}. Válido 10 min.`);
+      }
+    } catch (err) {
+      // OTP was never delivered — remove it so the rate-limit window is not consumed
+      // and the user can request a new code immediately (e.g. switch contact method).
+      await this.prisma.otpCode.deleteMany({ where: { id: otpRecord.id } }).catch(() => {});
+      throw err;
     }
   }
 
@@ -268,14 +275,24 @@ export class AuthService {
     return organizer;
   }
 
-  private readonly ADMIN_FAIL_KEY = 'admin:failures';
+  // Key scoped to the submitted phone hash so a random attacker cannot lock out the real admin
+  // phone — only someone who already knows the admin phone can exhaust the quota for that key.
+  private adminFailKey(phone: string): string {
+    return `admin:failures:${createHash('sha256').update(phone).digest('hex').slice(0, 16)}`;
+  }
 
   async adminLogin(dto: AdminLoginDto) {
     const adminPhone = this.config.get<string>('ADMIN_PHONE') ?? '';
     const adminPassword = this.config.get<string>('ADMIN_PASSWORD') ?? '';
+    const failKey = this.adminFailKey(dto.phone);
 
-    const failures = Number(await this.redis.get(this.ADMIN_FAIL_KEY) ?? 0);
-    if (failures >= ADMIN_MAX_FAILURES) {
+    // INCR is atomic: eliminates the GET→check→INCR TOCTOU race where concurrent requests
+    // could all read the same counter value and slip past the lockout simultaneously.
+    const attemptCount = await this.redis.incr(failKey);
+    if (attemptCount === 1) {
+      await this.redis.expire(failKey, Math.ceil(ADMIN_LOCK_WINDOW_MS / 1000));
+    }
+    if (attemptCount > ADMIN_MAX_FAILURES) {
       throw new HttpException(
         { code: 'ADMIN_LOCKED', message: 'Demasiadas tentativas. Tenta novamente dentro de 15 minutos.' },
         HttpStatus.TOO_MANY_REQUESTS,
@@ -286,12 +303,9 @@ export class AuthService {
     const phoneOk = safeEqual(dto.phone, adminPhone);
     const passwordOk = safeEqual(dto.password, adminPassword);
     if (!adminPhone || !adminPassword || !phoneOk || !passwordOk) {
-      const newCount = await this.redis.incr(this.ADMIN_FAIL_KEY);
-      // Apenas na primeira falha fixa o TTL; falhas seguintes não resetam o relógio
-      if (newCount === 1) await this.redis.expire(this.ADMIN_FAIL_KEY, Math.ceil(ADMIN_LOCK_WINDOW_MS / 1000));
       throw new UnauthorizedException({ code: 'ADMIN_INVALID_CREDENTIALS', message: 'Credenciais inválidas.' });
     }
-    await this.redis.del(this.ADMIN_FAIL_KEY);
+    await this.redis.del(failKey);
 
     // Garante que o organizer admin existe na BD
     let organizer = await this.prisma.organizer.findFirst({ where: { phone: adminPhone } });
